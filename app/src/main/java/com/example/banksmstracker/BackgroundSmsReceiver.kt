@@ -39,6 +39,10 @@ class BackgroundSmsReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
+                val dao = AppDatabase.getDatabase(context).appDao()
+                val blockedSenders = dao.getAllIgnored().filter { it.isSenderBlocked }.map { it.keyId }.toSet()
+                if (blockedSenders.contains(sender)) return@launch
+
                 delay(1500L)
                 val realSmsId = findLatestSmsId(context, fullBody) ?: timestamp.toString()
                 showTransactionNotification(context, quickCheck.copy(id = realSmsId))
@@ -103,7 +107,7 @@ class BackgroundSmsReceiver : BroadcastReceiver() {
 
         val typeTitle = if (tx.type == TransactionType.DEPOSIT) "واریز به حساب" else "برداشت از حساب"
         val title = "$typeTitle (${tx.bankName})"
-        val content = "مبلغ: ${formatCurrency(tx.amount)} ریال • برای ثبت توضیح لمس کنید"
+        val content = "مبلغ: ${formatCurrency(tx.amount)} ریال • برای دسته‌بندی لمس کنید"
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)

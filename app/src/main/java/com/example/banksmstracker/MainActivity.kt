@@ -2752,7 +2752,7 @@ fun TransactionDetailDialog(
                     }.filter { it.amount > 0L }
                     if (charges.isNotEmpty()) onSplitBuildingExpense(charges)
                 }
-                onSave(selectedCategory, finalNote, transferOverride, selectedUnitId, assignUnitToAllPayerDeposits, receiptPath)
+                onSave(selectedCategory, finalNote, transferOverride, selectedUnitId, applyToBuildingAccounting, assignUnitToAllPayerDeposits, receiptPath)
             }) { Text("ثبت آنی") }
         },
         dismissButton = {

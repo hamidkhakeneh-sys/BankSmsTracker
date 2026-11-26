@@ -33,5 +33,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: HamTaraz-v17-CompleteFix-APK
+          name: HamTaraz-v18-BuildFixed-APK
           path: app/build/outputs/apk/debug/app-debug.apk

@@ -438,13 +438,8 @@ fun readAllTransactionsFast(
             IranBankSmsParser.parseSms(id, sender, body, dateMillis)?.let { parsedTx ->
                 // اعمال نگاشت دستی شماره حساب به بانک (در صورتی که کاربر قبلاً این شماره حساب را به بانکی متصل کرده باشد)
                 val rawDigitsOnly = parsedTx.rawAccountNumber.replace(Regex("""[^\d]"""), "")
-                val rawDigitsOnly = parsedTx.rawAccountNumber.replace(Regex("""[^\d]"""), "")
                 val mappedBank = accountBankMappings[parsedTx.rawAccountNumber]
                     ?: accountBankMappings[parsedTx.accountNumber]
-                    ?: accountBankMappings.entries.firstOrNull { (k, _) ->
-                        val kDigits = k.replace(Regex("""[^\d]"""), "")
-                        kDigits.isNotEmpty() && (kDigits == rawDigitsOnly || (kDigits.length >= 6 && rawDigitsOnly.contains(kDigits)))
-                    }?.value
                     ?: accountBankMappings.entries.firstOrNull { (k, _) ->
                         val kDigits = k.replace(Regex("""[^\d]"""), "")
                         kDigits.isNotEmpty() && (kDigits == rawDigitsOnly || (kDigits.length >= 6 && rawDigitsOnly.contains(kDigits)))

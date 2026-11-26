@@ -13,8 +13,8 @@ android {
         applicationId = "com.example.banksmstracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "9.0"
+        versionCode = 12
+        versionName = "12.0"
     }
 
     buildTypes {

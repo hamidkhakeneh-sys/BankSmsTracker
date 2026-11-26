@@ -36,7 +36,28 @@ data class BuildingUnitEntity(
     val residentName: String,
     val monthlyCharge: Long,
     val phoneNumber: String = "",
-    val openingBalance: Long = 0L
+    val openingBalance: Long = 0L,
+    val floor: String = "",          // طبقه (مثلاً: طبقه یک)
+    val areaSqm: Int = 0,            // متراژ (متر مربع)
+    val residentCount: Int = 1,      // تعداد نفرات ساکن
+    val roleType: String = "ساکن"    // مالک، ساکن، واحد خالی
+)
+
+// ثبت دستی هزینه‌ها، درآمدهای نقدی صندوق و بستانکاری مستقیم واحدها (الهام‌گرفته از شارژمام)
+@Entity(tableName = "manual_building_entries")
+data class ManualBuildingEntryEntity(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val entryType: String,           // "EXPENSE" (هزینه نقدی), "INCOME" (درآمد صندوق), "UNIT_CREDIT" (بستانکاری مستقیم واحد)
+    val title: String,
+    val amount: Long,
+    val category: String = "",
+    val unitId: Int? = null,         // برای بستانکاری مستقیم واحد
+    val targetRole: String = "ساکن", // ساکن، مالک، واحد خالی
+    val receiptImagePath: String = "",
+    val note: String = "",
+    val persianDate: String,
+    val persianMonthYear: String,
+    val timestampMillis: Long
 )
 
 @Entity(tableName = "unit_charges")
@@ -47,7 +68,8 @@ data class UnitChargeEntity(
     val title: String,
     val persianDate: String,
     val persianMonthYear: String,
-    val timestampMillis: Long
+    val timestampMillis: Long,
+    val isAutoMonthly: Boolean = false // مشخص می‌کند که این بدهی به‌صورت خودکار در روز ۱ ماه صادر شده است
 )
 
 @Entity(tableName = "imported_bank_records")
@@ -128,6 +150,19 @@ interface AppDao {
     @Query("DELETE FROM unit_charges WHERE id = :chargeId")
     suspend fun deleteUnitCharge(chargeId: Int)
 
+    // عملیات دستی صندوق ساختمان (هزینه، درآمد، بستانکاری مستقیم واحدها)
+    @Query("SELECT * FROM manual_building_entries ORDER BY timestampMillis DESC")
+    suspend fun getAllManualBuildingEntries(): List<ManualBuildingEntryEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertManualBuildingEntry(entry: ManualBuildingEntryEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertManualBuildingEntries(entries: List<ManualBuildingEntryEntity>)
+
+    @Query("DELETE FROM manual_building_entries WHERE id = :entryId")
+    suspend fun deleteManualBuildingEntry(entryId: Int)
+
     @Query("SELECT * FROM imported_bank_records")
     suspend fun getAllImportedRecords(): List<ImportedRecordEntity>
 
@@ -169,12 +204,13 @@ interface AppDao {
         PayerUnitMappingEntity::class,
         BuildingUnitEntity::class,
         UnitChargeEntity::class,
+        ManualBuildingEntryEntity::class,
         ImportedRecordEntity::class,
         IgnoredItemEntity::class,
         CategoryEntity::class,
         AppSettingEntity::class
     ],
-    version = 8,
+    version = 12,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -210,7 +246,7 @@ abstract class AppDatabase : RoomDatabase() {
                 val instance = Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
-                    "holoo_sharjeman_v8_db"
+                    "holoo_sharjeman_v12_db"
                 )
                     .fallbackToDestructiveMigration()
                     .build()

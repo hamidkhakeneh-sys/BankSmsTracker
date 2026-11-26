@@ -97,8 +97,14 @@ object IranBankSmsParser {
         """(?:مانده|موجودی|م\.حساب|باقیمانده)\s*[:=\-]?\s*([\d,]{1,18})\s*(?:ریال|تومان)?"""
     )
 
-    private val accountRegex = Regex(
-        """(?:حساب|کارت|ش\.حساب|شماره حساب)\s*[:=\-*]?\s*([\d*.\-]{3,18})"""
+    // استخراج شماره حساب دارای برچسب (حداقل یک رقم داشته باشد تا با کاراکترهای تزئینی مثل *** اشتباه نشود)
+    private val labeledAccountRegex = Regex(
+        """(?:حساب|کارت|ش\.حساب|شماره حساب)\s*[:=\-*]?\s*([\d*.\-]*\d[\d*.\-]{2,20})"""
+    )
+
+    // استخراج شماره حساب بدون برچسب در ابتدای خط (مثل 361970003195155001 در پیامک‌های کوتاه بانک مهر ایران)
+    private val standaloneAccountRegex = Regex(
+        """(?m)^\s*(\d[\d\-]{11,21})\s*$"""
     )
 
     private val payerCardOrAccRegex = Regex(
@@ -126,9 +132,20 @@ object IranBankSmsParser {
         val balanceMatch = balanceRegex.find(body) ?: return null
         val balanceAmount = balanceMatch.groupValues[1].replace(",", "").toLongOrNull()
 
-        val accMatch = accountRegex.find(body)
+        val accMatch = labeledAccountRegex.find(body) ?: standaloneAccountRegex.find(body)
         val rawAcc = accMatch?.groupValues?.get(1)?.trim() ?: "اصلی"
-        val cleanAcc = if (rawAcc.length > 8 && !rawAcc.contains(".")) rawAcc.takeLast(5) else rawAcc
+        // استخراج هسته یکتای شماره حساب (حذف خط تیره و نقطه برای یکسان‌سازی فرمت‌های مختلف یک حساب، مثل 3608-700-3195155-1 و 361970003195155001)
+        val digitsOnlyAcc = rawAcc.replace(Regex("""[^\d]"""), "")
+        val cleanAcc = when {
+            digitsOnlyAcc.length >= 10 -> {
+                // شماره حساب‌های طولانی بانکی (مثل مهر ایران 360870031951551 یا 361970003195155001): بخش میانی/اصلی شماره مشتری را استخراج کن
+                val core = if (digitsOnlyAcc.length >= 15) digitsOnlyAcc.drop(7).take(7) else digitsOnlyAcc.takeLast(7)
+                core.ifEmpty { digitsOnlyAcc.takeLast(6) }
+            }
+            digitsOnlyAcc.length in 4..9 -> digitsOnlyAcc
+            rawAcc.contains(".") -> rawAcc
+            else -> "اصلی"
+        }
 
         val payerMatch = payerCardOrAccRegex.find(body)
         val rawPayer = payerMatch?.groupValues?.get(1)?.trim() ?: ""
@@ -201,7 +218,7 @@ object IranBankSmsParser {
 
         return when {
             bodyLower.contains("بانک قرض الحسنه رسالت") || bodyLower.contains("بانک رسالت") -> "بانک رسالت"
-            bodyLower.contains("بانک قرض الحسنه مهر") || bodyLower.contains("مهر ایران") -> "مهر ایران"
+            bodyLower.contains("بانک قرض الحسنه مهر") || bodyLower.contains("مهر ایران") || bodyLower.contains("مهرایران") || bodyLower.contains("qmehr") -> "مهر ایران"
             bodyLower.contains("بانک تجارت") -> "بانک تجارت"
             bodyLower.contains("بانک سامان") -> "بانک سامان"
             bodyLower.contains("بانک ملت") -> "بانک ملت"
@@ -403,6 +420,36 @@ fun readAllTransactionsFast(
                         userNote = finalNote,
                         category = finalCategory
                     )
+                )
+            }
+        }
+    }
+
+    // نگاشت هوشمند شماره حساب‌های بدون عنوان بانک به نام بانک شناخته‌شده در سایر پیامک‌ها
+    // (مثلاً اگر در یک پیامک بانک مهر ایران نام بانک بود و در پیامک بعدی فقط شماره حساب 3195155 آمد، هر دو یکپارچه شوند)
+    val knownBankByAccountNum = rawTransactions
+        .filter { it.bankName != "سایر بانک‌ها" && it.accountNumber != "اصلی" }
+        .associate { it.accountNumber to it.bankName }
+
+    for (i in rawTransactions.indices) {
+        val tx = rawTransactions[i]
+        if (tx.bankName == "سایر بانک‌ها" && tx.accountNumber != "اصلی") {
+            val resolvedBank = knownBankByAccountNum[tx.accountNumber]
+            if (resolvedBank != null) {
+                val fixedAccountKey = "$resolvedBank - ${tx.accountNumber}"
+                val profile = discoveredAccounts.getOrPut(fixedAccountKey) {
+                    AccountProfileEntity(
+                        accountKey = fixedAccountKey,
+                        bankName = resolvedBank,
+                        accountNumber = tx.accountNumber,
+                        customTitle = fixedAccountKey,
+                        scope = tx.scope
+                    )
+                }
+                rawTransactions[i] = tx.copy(
+                    bankName = resolvedBank,
+                    accountKey = fixedAccountKey,
+                    scope = profile.scope
                 )
             }
         }

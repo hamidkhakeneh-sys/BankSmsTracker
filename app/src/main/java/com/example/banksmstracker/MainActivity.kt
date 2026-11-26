@@ -183,6 +183,9 @@ fun HolooSmsAccountingApp(
     var payerMappings by remember { mutableStateOf<List<PayerUnitMappingEntity>>(emptyList()) }
     var buildingUnits by remember { mutableStateOf<List<BuildingUnitEntity>>(emptyList()) }
     var unitCharges by remember { mutableStateOf<List<UnitChargeEntity>>(emptyList()) }
+    var manualBuildingEntries by remember { mutableStateOf<List<ManualBuildingEntryEntity>>(emptyList()) }
+    var buildingName by remember { mutableStateOf("ساختمان من") }
+    var autoMonthlyChargeEnabled by remember { mutableStateOf(true) }
     var customScopes by remember { mutableStateOf<List<String>>(listOf("شخصی", "مدیریت ساختمان")) }
 
     var isLoading by remember { mutableStateOf(false) }
@@ -312,8 +315,45 @@ fun HolooSmsAccountingApp(
                     chartViewMode = ChartViewMode.YEARLY_DRILLDOWN
                 }
 
-                buildingUnits = appDao.getAllBuildingUnits()
-                unitCharges = appDao.getAllUnitCharges()
+                val loadedUnits = appDao.getAllBuildingUnits()
+                var loadedCharges = appDao.getAllUnitCharges()
+                val isAutoChargeOn = settingsMap["auto_monthly_charge"]?.toBooleanStrictOrNull() ?: true
+                autoMonthlyChargeEnabled = isAutoChargeOn
+
+                // صدور خودکار شارژ ماهانه در تاریخ ۱ ماه جاری برای تمام واحدها (در صورت فعال بودن)
+                if (isAutoChargeOn && loadedUnits.isNotEmpty()) {
+                    val pNow = PersianDate()
+                    val currentMonthKey = PersianDateFormat("Y/m").format(pNow) // مثلاً "1405/09"
+                    val firstDayOfMonthDate = "$currentMonthKey/01"
+                    val monthTitle = "شارژ ماهانه ${formatPersianMonthShort(currentMonthKey)} (صدور خودکار یکم ماه)"
+
+                    val missingAutoCharges = loadedUnits.filter { unit ->
+                        unit.monthlyCharge > 0L && loadedCharges.none { ch ->
+                            ch.unitId == unit.id && ch.persianMonthYear == currentMonthKey && ch.isAutoMonthly
+                        }
+                    }.map { unit ->
+                        UnitChargeEntity(
+                            unitId = unit.id,
+                            amount = unit.monthlyCharge,
+                            title = monthTitle,
+                            persianDate = firstDayOfMonthDate,
+                            persianMonthYear = currentMonthKey,
+                            timestampMillis = System.currentTimeMillis(),
+                            isAutoMonthly = true
+                        )
+                    }
+
+                    if (missingAutoCharges.isNotEmpty()) {
+                        appDao.insertUnitCharges(missingAutoCharges)
+                        loadedCharges = appDao.getAllUnitCharges()
+                    }
+                }
+
+                buildingUnits = loadedUnits
+                unitCharges = loadedCharges
+                manualBuildingEntries = appDao.getAllManualBuildingEntries()
+                val savedBName = settingsMap["building_name"]
+                if (!savedBName.isNullOrBlank()) buildingName = savedBName
 
                 val ignoredList = appDao.getAllIgnored()
                 ignoredItems = ignoredList
@@ -584,6 +624,7 @@ fun HolooSmsAccountingApp(
                         )
                         1 -> JournalScreen(
                             transactions = journalTransactions,
+                            buildingUnits = buildingUnits,
                             searchQuery = searchQuery,
                             onSearchChange = { searchQuery = it },
                             selectedType = selectedTypeFilter,
@@ -599,11 +640,53 @@ fun HolooSmsAccountingApp(
                         2 -> SharjemanBuildingScreen(
                             units = buildingUnits,
                             unitCharges = unitCharges,
+                            manualEntries = manualBuildingEntries,
                             buildingTransactions = buildingTransactions,
+                            buildingCategories = categories.filter { it.scope == "مدیریت ساختمان" },
+                            buildingName = buildingName,
+                            autoMonthlyChargeEnabled = autoMonthlyChargeEnabled,
+                            onToggleAutoMonthlyCharge = { enabled ->
+                                autoMonthlyChargeEnabled = enabled
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.saveSetting(AppSettingEntity("auto_monthly_charge", enabled.toString()))
+                                    if (enabled) fullReloadFromSms()
+                                }
+                            },
+                            onUpdateBuildingName = { newBName ->
+                                buildingName = newBName
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.saveSetting(AppSettingEntity("building_name", newBName))
+                                }
+                            },
                             onAddOrUpdateUnit = { unit ->
                                 coroutineScope.launch(Dispatchers.IO) {
-                                    appDao.saveBuildingUnit(unit)
-                                    buildingUnits = appDao.getAllBuildingUnits()
+                                    val insertedId = appDao.saveBuildingUnit(unit).toInt()
+                                    val updatedUnits = appDao.getAllBuildingUnits()
+                                    buildingUnits = updatedUnits
+                                    // اگر واحد جدید تعریف شد و شارژ خودکار یکم ماه فعال است، شارژ ماه جاری را برایش ثبت کن
+                                    if (autoMonthlyChargeEnabled && unit.monthlyCharge > 0L) {
+                                        val targetId = if (unit.id != 0) unit.id else insertedId
+                                        val pNow = PersianDate()
+                                        val currentMonthKey = PersianDateFormat("Y/m").format(pNow)
+                                        val existing = appDao.getAllUnitCharges()
+                                        val alreadyHas = existing.any { it.unitId == targetId && it.persianMonthYear == currentMonthKey && it.isAutoMonthly }
+                                        if (!alreadyHas && targetId > 0) {
+                                            appDao.insertUnitCharges(
+                                                listOf(
+                                                    UnitChargeEntity(
+                                                        unitId = targetId,
+                                                        amount = unit.monthlyCharge,
+                                                        title = "شارژ ماهانه ${formatPersianMonthShort(currentMonthKey)} (صدور خودکار یکم ماه)",
+                                                        persianDate = "$currentMonthKey/01",
+                                                        persianMonthYear = currentMonthKey,
+                                                        timestampMillis = System.currentTimeMillis(),
+                                                        isAutoMonthly = true
+                                                    )
+                                                )
+                                            )
+                                            unitCharges = appDao.getAllUnitCharges()
+                                        }
+                                    }
                                 }
                             },
                             onDeleteUnit = { unitId ->
@@ -612,40 +695,9 @@ fun HolooSmsAccountingApp(
                                     buildingUnits = appDao.getAllBuildingUnits()
                                 }
                             },
-                            onChargeAllUnitsMonthly = { title, customAmount ->
-                                val now = System.currentTimeMillis()
-                                val pDate = PersianDate(now)
-                                val dateStr = PersianDateFormat("Y/m/d").format(pDate)
-                                val monthStr = PersianDateFormat("Y/m").format(pDate)
-                                val newCharges = buildingUnits.map { u ->
-                                    UnitChargeEntity(
-                                        unitId = u.id,
-                                        amount = customAmount ?: u.monthlyCharge,
-                                        title = title,
-                                        persianDate = dateStr,
-                                        persianMonthYear = monthStr,
-                                        timestampMillis = now
-                                    )
-                                }
+                            onDeclareDebtBatch = { chargesList ->
                                 coroutineScope.launch(Dispatchers.IO) {
-                                    appDao.insertUnitCharges(newCharges)
-                                    unitCharges = appDao.getAllUnitCharges()
-                                }
-                                Toast.makeText(context, "بدهی شارژ برای ${buildingUnits.size} واحد صادر شد", Toast.LENGTH_SHORT).show()
-                            },
-                            onChargeSingleUnit = { uId, title, amt ->
-                                val now = System.currentTimeMillis()
-                                val pDate = PersianDate(now)
-                                val ch = UnitChargeEntity(
-                                    unitId = uId,
-                                    amount = amt,
-                                    title = title,
-                                    persianDate = PersianDateFormat("Y/m/d").format(pDate),
-                                    persianMonthYear = PersianDateFormat("Y/m").format(pDate),
-                                    timestampMillis = now
-                                )
-                                coroutineScope.launch(Dispatchers.IO) {
-                                    appDao.insertUnitCharges(listOf(ch))
+                                    appDao.insertUnitCharges(chargesList)
                                     unitCharges = appDao.getAllUnitCharges()
                                 }
                             },
@@ -654,6 +706,27 @@ fun HolooSmsAccountingApp(
                                     appDao.deleteUnitCharge(chId)
                                     unitCharges = appDao.getAllUnitCharges()
                                 }
+                            },
+                            onAddManualEntry = { entry ->
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.insertManualBuildingEntry(entry)
+                                    manualBuildingEntries = appDao.getAllManualBuildingEntries()
+                                }
+                            },
+                            onAddManualEntriesBatch = { entriesList ->
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.insertManualBuildingEntries(entriesList)
+                                    manualBuildingEntries = appDao.getAllManualBuildingEntries()
+                                }
+                            },
+                            onDeleteManualEntry = { entryId ->
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.deleteManualBuildingEntry(entryId)
+                                    manualBuildingEntries = appDao.getAllManualBuildingEntries()
+                                }
+                            },
+                            onSelectBankTransaction = { tx ->
+                                selectedTransaction = tx
                             }
                         )
                         3 -> AdvancedReportsScreen(
@@ -736,6 +809,13 @@ fun HolooSmsAccountingApp(
                 categories = categories,
                 buildingUnits = buildingUnits,
                 onDismiss = { selectedTransaction = null },
+                onSplitBuildingExpense = { generatedCharges ->
+                    coroutineScope.launch(Dispatchers.IO) {
+                        appDao.insertUnitCharges(generatedCharges)
+                        unitCharges = appDao.getAllUnitCharges()
+                    }
+                    Toast.makeText(context, "مبلغ هزینه بین ${generatedCharges.size} واحد تقسیم و بدهکار شد", Toast.LENGTH_LONG).show()
+                },
                 onSave = { newCategory, newNote, transferOverride, selectedUnitId, assignUnitToPayerCard, receiptPath ->
                     val targetPayer = currentTx.payerIdentifier
                     val unitObj = buildingUnits.find { it.id == selectedUnitId }
@@ -1114,6 +1194,7 @@ fun DashboardScreen(
 @Composable
 fun JournalScreen(
     transactions: List<BankTransaction>,
+    buildingUnits: List<BuildingUnitEntity>,
     searchQuery: String,
     onSearchChange: (String) -> Unit,
     selectedType: TypeFilter,
@@ -1195,7 +1276,15 @@ fun JournalScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(transactions, key = { it.id }) { tx ->
-                    TransactionCard(transaction = tx, onClick = { onTransactionClick(tx) })
+                    val unitTitle = remember(tx.unitId, buildingUnits) {
+                        tx.unitId?.let { id -> buildingUnits.find { it.id == id } }
+                            ?.let { "${it.unitNumber} • ${it.residentName}" }
+                    }
+                    TransactionCard(
+                        transaction = tx,
+                        unitDisplayTitle = unitTitle,
+                        onClick = { onTransactionClick(tx) }
+                    )
                 }
             }
         }
@@ -1696,6 +1785,7 @@ fun SettingsAndReconciliationScreen(
 @Composable
 fun TransactionCard(
     transaction: BankTransaction,
+    unitDisplayTitle: String? = null,
     onClick: () -> Unit
 ) {
     val statusColor = when (transaction.type) {
@@ -1802,6 +1892,24 @@ fun TransactionCard(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    if (!unitDisplayTitle.isNullOrBlank()) {
+                        Surface(color = Color(0xFF00796B), shape = RoundedCornerShape(6.dp)) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Rounded.MeetingRoom, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = unitDisplayTitle,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
                     if (transaction.category.isNotBlank()) {
                         Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = RoundedCornerShape(6.dp)) {
                             Text(
@@ -1815,12 +1923,19 @@ fun TransactionCard(
                     }
                     Text(
                         text = when {
+                            !unitDisplayTitle.isNullOrBlank() && transaction.userNote == unitDisplayTitle -> ""
                             transaction.userNote.isNotBlank() -> transaction.userNote
+                            transaction.scope == "مدیریت ساختمان" && transaction.type == TransactionType.DEPOSIT && unitDisplayTitle.isNullOrBlank() ->
+                                "لمس کنید تا واحد واریزکننده مشخص شود..."
                             transaction.category.isNotBlank() -> ""
                             else -> "برای دسته‌بندی یا ثبت سند لمس کنید..."
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (transaction.userNote.isNotBlank()) Color(0xFF0F2942) else Color.Gray,
+                        color = when {
+                            transaction.userNote.isNotBlank() -> Color(0xFF0F2942)
+                            transaction.scope == "مدیریت ساختمان" && transaction.type == TransactionType.DEPOSIT && unitDisplayTitle.isNullOrBlank() -> Color(0xFFE65100)
+                            else -> Color.Gray
+                        },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -1838,6 +1953,7 @@ fun TransactionDetailDialog(
     categories: List<CategoryEntity>,
     buildingUnits: List<BuildingUnitEntity>,
     onDismiss: () -> Unit,
+    onSplitBuildingExpense: (List<UnitChargeEntity>) -> Unit = {},
     onSave: (String, String, Boolean?, Int?, Boolean, String) -> Unit,
     onMarkAsNotBankSms: (Boolean) -> Unit,
     onAddNewCategory: (String) -> Unit
@@ -1848,6 +1964,8 @@ fun TransactionDetailDialog(
     var selectedUnitId by remember { mutableStateOf(transaction.unitId) }
     var receiptPath by remember { mutableStateOf(transaction.receiptImagePath) }
     var isInternalTransfer by remember { mutableStateOf(transaction.type == TransactionType.INTERNAL) }
+    var splitExpenseAmongUnits by remember { mutableStateOf(false) }
+    var expenseSplitMode by remember { mutableIntStateOf(0) } // 0: مساوی، 1: متراژ، 2: نفرات
     var assignUnitToAllPayerDeposits by remember { mutableStateOf(transaction.payerIdentifier.isNotEmpty() && transaction.type == TransactionType.DEPOSIT) }
     var showQuickAddCategory by remember { mutableStateOf(false) }
     var quickNewCatName by remember { mutableStateOf("") }
@@ -1965,6 +2083,35 @@ fun TransactionDetailDialog(
                                     style = MaterialTheme.typography.labelSmall,
                                     color = Color(0xFF004D40)
                                 )
+                            }
+                        }
+                    }
+                }
+
+                // پرسش برای برداشت‌های حساب ساختمان: از محل شارژ یا تقسیم بین واحدها؟
+                if (transaction.scope == "مدیریت ساختمان" && transaction.type == TransactionType.WITHDRAWAL && !isInternalTransfer && buildingUnits.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Surface(color = Color(0xFFFFF8E1), shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(8.dp)) {
+                            Text("این هزینه ساختمان از چه محلی تامین شود؟", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium, color = Color(0xFFE65100))
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { splitExpenseAmongUnits = false }) {
+                                RadioButton(selected = !splitExpenseAmongUnits, onClick = { splitExpenseAmongUnits = false })
+                                Text("از محل شارژ موجود در صندوق", style = MaterialTheme.typography.bodySmall)
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { splitExpenseAmongUnits = true }) {
+                                RadioButton(selected = splitExpenseAmongUnits, onClick = { splitExpenseAmongUnits = true })
+                                Text("تقسیم مبلغ بین واحدها (ثبت بدهکاری)", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                            }
+                            if (splitExpenseAmongUnits) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    listOf("مساوی", "متراژ", "نفرات").forEachIndexed { idx, lbl ->
+                                        FilterChip(
+                                            selected = expenseSplitMode == idx,
+                                            onClick = { expenseSplitMode = idx },
+                                            label = { Text(lbl, style = MaterialTheme.typography.labelSmall) }
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -2119,7 +2266,40 @@ fun TransactionDetailDialog(
         confirmButton = {
             Button(onClick = {
                 val transferOverride: Boolean? = if (isInternalTransfer) true else if (transaction.type == TransactionType.INTERNAL) false else null
-                onSave(selectedCategory, noteText.trim(), transferOverride, selectedUnitId, assignUnitToAllPayerDeposits, receiptPath)
+                val finalNote = if (splitExpenseAmongUnits && !noteText.contains("تقسیم")) {
+                    "${noteText.trim().ifEmpty { selectedCategory.ifEmpty { "هزینه ساختمان" } }} (تقسیم بین واحدها)"
+                } else {
+                    noteText.trim()
+                }
+                if (splitExpenseAmongUnits && buildingUnits.isNotEmpty() && transaction.type == TransactionType.WITHDRAWAL) {
+                    val now = System.currentTimeMillis()
+                    val pDate = PersianDate(now)
+                    val dateStr = PersianDateFormat("Y/m/d").format(pDate)
+                    val monthStr = PersianDateFormat("Y/m").format(pDate)
+                    val expTitle = noteText.trim().ifEmpty { selectedCategory.ifEmpty { "هزینه ساختمان" } }
+                    val charges = when (expenseSplitMode) {
+                        0 -> {
+                            val perUnit = transaction.amount / buildingUnits.size
+                            buildingUnits.map { u -> UnitChargeEntity(unitId = u.id, amount = perUnit, title = "سهم هزینه: $expTitle", persianDate = dateStr, persianMonthYear = monthStr, timestampMillis = now) }
+                        }
+                        1 -> {
+                            val totalArea = buildingUnits.sumOf { it.areaSqm.coerceAtLeast(1) }.toDouble()
+                            buildingUnits.map { u ->
+                                val share = ((u.areaSqm.coerceAtLeast(1) / totalArea) * transaction.amount).toLong()
+                                UnitChargeEntity(unitId = u.id, amount = share, title = "سهم هزینه (متراژ): $expTitle", persianDate = dateStr, persianMonthYear = monthStr, timestampMillis = now)
+                            }
+                        }
+                        else -> {
+                            val totalPeople = buildingUnits.sumOf { it.residentCount.coerceAtLeast(1) }.toDouble()
+                            buildingUnits.map { u ->
+                                val share = ((u.residentCount.coerceAtLeast(1) / totalPeople) * transaction.amount).toLong()
+                                UnitChargeEntity(unitId = u.id, amount = share, title = "سهم هزینه (نفرات): $expTitle", persianDate = dateStr, persianMonthYear = monthStr, timestampMillis = now)
+                            }
+                        }
+                    }.filter { it.amount > 0L }
+                    if (charges.isNotEmpty()) onSplitBuildingExpense(charges)
+                }
+                onSave(selectedCategory, finalNote, transferOverride, selectedUnitId, assignUnitToAllPayerDeposits, receiptPath)
             }) { Text("ثبت آنی") }
         },
         dismissButton = {

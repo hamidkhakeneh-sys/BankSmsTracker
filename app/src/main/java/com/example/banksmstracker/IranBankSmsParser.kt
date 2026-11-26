@@ -77,14 +77,19 @@ object IranBankSmsParser {
             .replace('٩', '9')
     }
 
+    // الگوهای دقیق برای حذف پیامک‌های اطلاع‌رسانی، تبلیغات اپراتور، وام و قبوض شرکت برق/مخابرات
     private val nonTransactionKeywords = listOf(
-        "رمز", "پویا", "اعتبار این رمز",
-        "صورتحساب", "صورت حساب", "مهلت پرداخت", "قابل پرداخت",
-        "شناسه قبض", "شناسه پرداخت", "ش ق:", "ش پ:", "مشترک گرامی",
+        "رمز", "پویا", "اعتبار این رمز", "کد تایید", "کد ورود",
+        "صورتحساب", "صورت حساب", "مهلت پرداخت", "قابل پرداخت", "باقی مانده هزینه",
+        "شناسه قبض", "شناسه پرداخت", "ش ق:", "ش پ:", "مشترک گرامی", "درخواست انشعاب",
+        "توزیع نیروی برق", "برق مشهد", "تابلو کنتور",
         "بدهی پیشین", "بدهی کل", "تخفیف", "جشنواره", "قرعه کشی", "وام فوری",
-        "کد تایید", "کد ورود", "ورود به همراه بانک"
+        "بسته مکالمه", "شاتل موبایل", "شماره گیری", "سرویس اعتباری", "جیب جت",
+        "بازپرداخت خود را", "تسهیلات به مبلغ", "تشکیل پرونده", "طرح یاقوت",
+        "هزینه پیامک ارسالی", "قطع استفاده از سرویس", "عدد 1 را"
     )
 
+    // شرط طلایی کاربر: پیامک بانکی واقعی تقریباً همیشه شامل "مانده" یا "موجودی" حساب است
     private val balanceRegex = Regex(
         """(?:مانده|موجودی|م\.حساب|باقیمانده)\s*[:=\-]?\s*([\d,]{1,18})\s*(?:ریال|تومان)?"""
     )
@@ -110,14 +115,12 @@ object IranBankSmsParser {
     fun parseSms(id: String, sender: String, rawBody: String, timestamp: Long): BankTransaction? {
         val body = normalizePersian(rawBody)
 
+        // ۱. حذف پیامک‌های اطلاع‌رسانی، قبوض، اپراتورها و تبلیغات وام
         if (nonTransactionKeywords.any { body.contains(it) }) return null
 
-        val isFinancial = body.contains("حساب") || body.contains("بانک") ||
-                body.contains("کارت") || body.contains("مانده") || body.contains("موجودی")
-        if (!isFinancial) return null
-
-        val balanceMatch = balanceRegex.find(body)
-        val balanceAmount = balanceMatch?.groupValues?.get(1)?.replace(",", "")?.toLongOrNull()
+        // ۲. شرط الزامی وجود "مانده" یا "موجودی" در پیامک (برای جلوگیری از ورود پیامک‌های غیرتراکنشی)
+        val balanceMatch = balanceRegex.find(body) ?: return null
+        val balanceAmount = balanceMatch.groupValues[1].replace(",", "").toLongOrNull()
 
         val accMatch = accountRegex.find(body)
         val rawAcc = accMatch?.groupValues?.get(1)?.trim() ?: "اصلی"
@@ -127,8 +130,7 @@ object IranBankSmsParser {
         val rawPayer = payerMatch?.groupValues?.get(1)?.trim() ?: ""
         val cleanPayer = if (rawPayer.isNotEmpty() && rawPayer != rawAcc) rawPayer else ""
 
-        var cleanBodyForAmount = body
-        if (balanceMatch != null) cleanBodyForAmount = cleanBodyForAmount.replace(balanceMatch.value, "")
+        var cleanBodyForAmount = body.replace(balanceMatch.value, "")
         if (accMatch != null) cleanBodyForAmount = cleanBodyForAmount.replace(accMatch.value, "")
         if (payerMatch != null) cleanBodyForAmount = cleanBodyForAmount.replace(payerMatch.value, "")
 
@@ -160,6 +162,7 @@ object IranBankSmsParser {
 
         if (type == TransactionType.UNKNOWN) return null
 
+        // ۳. تشخیص دقیق نام بانک (اصلاح باگ تشخیص اشتباه بانک تجارت به جای سامان به خاطر کلمه "سامانه پل")
         val bankName = detectBankName(sender, body)
         val accountKey = "$bankName - $cleanAcc"
         val pDate = PersianDate(timestamp)
@@ -190,26 +193,44 @@ object IranBankSmsParser {
 
     private fun detectBankName(sender: String, normalizedBody: String): String {
         val text = normalizePersian("$sender $normalizedBody").lowercase()
+        // حذف کلمه "سامانه" (مثل سامانه پل، سامانه شتاب، سامانه ساتنا) تا با "بانک سامان" اشتباه نشود!
+        val cleanedText = text.replace("سامانه", "")
+
+        // ابتدا بررسی سرشماره‌های معروف و نام صریح "بانک ..."
         return when {
-            text.contains("blu") || text.contains("بلو") -> "بلوبانک"
-            text.contains("mellat") || text.contains("ملت") -> "بانک ملت"
-            text.contains("melli") || text.contains("ملی") || text.contains("bmi") -> "بانک ملی"
-            text.contains("saman") || text.contains("سامان") -> "بانک سامان"
-            text.contains("pasargad") || text.contains("پاسارگاد") || text.contains("bpi") -> "بانک پاسارگاد"
-            text.contains("saderat") || text.contains("صادرات") -> "بانک صادرات"
-            text.contains("tejarat") || text.contains("تجارت") -> "بانک تجارت"
-            text.contains("sepah") || text.contains("سپه") -> "بانک سپه"
-            text.contains("keshavarzi") || text.contains("کشاورزی") -> "بانک کشاورزی"
-            text.contains("maskan") || text.contains("مسکن") -> "بانک مسکن"
-            text.contains("refah") || text.contains("رفاه") -> "بانک رفاه"
-            text.contains("shahr") || text.contains("شهر") -> "بانک شهر"
-            text.contains("ayandeh") || text.contains("اینده") -> "بانک آینده"
-            text.contains("resalat") || text.contains("رسالت") -> "بانک رسالت"
-            text.contains("parsian") || text.contains("پارسیان") -> "بانک پارسیان"
-            text.contains("eghtesad") || text.contains("اقتصاد نوین") -> "اقتصاد نوین"
-            text.contains("sina") || text.contains("سینا") -> "بانک سینا"
-            text.contains("post") || text.contains("پست بانک") -> "پست بانک"
-            text.contains("mehr") || text.contains("مهر ایران") -> "مهر ایران"
+            cleanedText.contains("بانک تجارت") || cleanedText.contains("tejarat") -> "بانک تجارت"
+            cleanedText.contains("بانک سامان") || cleanedText.contains("saman") -> "بانک سامان"
+            cleanedText.contains("بانک ملت") || cleanedText.contains("mellat") -> "بانک ملت"
+            cleanedText.contains("بانک ملی") || cleanedText.contains("melli") || cleanedText.contains("bmi") -> "بانک ملی"
+            cleanedText.contains("بانک پاسارگاد") || cleanedText.contains("pasargad") || cleanedText.contains("bpi") -> "بانک پاسارگاد"
+            cleanedText.contains("بانک صادرات") || cleanedText.contains("saderat") -> "بانک صادرات"
+            cleanedText.contains("بانک سپه") || cleanedText.contains("sepah") -> "بانک سپه"
+            cleanedText.contains("بانک کشاورزی") || cleanedText.contains("keshavarzi") -> "بانک کشاورزی"
+            cleanedText.contains("بانک مسکن") || cleanedText.contains("maskan") -> "بانک مسکن"
+            cleanedText.contains("بانک رفاه") || cleanedText.contains("refah") -> "بانک رفاه"
+            cleanedText.contains("بانک شهر") || cleanedText.contains("shahr") -> "بانک شهر"
+            cleanedText.contains("بانک اینده") || cleanedText.contains("ayandeh") -> "بانک آینده"
+            cleanedText.contains("بانک رسالت") || cleanedText.contains("resalat") -> "بانک رسالت"
+            cleanedText.contains("بانک پارسیان") || cleanedText.contains("parsian") -> "بانک پارسیان"
+            cleanedText.contains("اقتصاد نوین") || cleanedText.contains("eghtesad") -> "اقتصاد نوین"
+            cleanedText.contains("بانک سینا") || cleanedText.contains("sina") -> "بانک سینا"
+            cleanedText.contains("پست بانک") || cleanedText.contains("post") -> "پست بانک"
+            cleanedText.contains("مهر ایران") || cleanedText.contains("mehr") -> "مهر ایران"
+            cleanedText.contains("blu") || cleanedText.contains("بلو") -> "بلوبانک"
+            // بررسی سرشماره پیامک بدون کلمه "بانک"
+            cleanedText.contains("تجارت") -> "بانک تجارت"
+            cleanedText.contains("سامان") -> "بانک سامان"
+            cleanedText.contains("ملت") -> "بانک ملت"
+            cleanedText.contains("ملی") -> "بانک ملی"
+            cleanedText.contains("پاسارگاد") -> "بانک پاسارگاد"
+            cleanedText.contains("صادرات") -> "بانک صادرات"
+            cleanedText.contains("سپه") -> "بانک سپه"
+            cleanedText.contains("کشاورزی") -> "بانک کشاورزی"
+            cleanedText.contains("مسکن") -> "بانک مسکن"
+            cleanedText.contains("رفاه") -> "بانک رفاه"
+            cleanedText.contains("شهر") -> "بانک شهر"
+            cleanedText.contains("اینده") -> "بانک آینده"
+            cleanedText.contains("رسالت") -> "بانک رسالت"
             else -> "سایر بانک‌ها"
         }
     }
@@ -400,7 +421,7 @@ fun readAllTransactionsFast(
         rawTransactions.add(
             BankTransaction(
                 id = imp.recordId,
-                sender = "فایل اکسل بانک",
+                sender = "فایل بانکی (اکسل/PDF)",
                 bankName = profile.bankName,
                 accountNumber = profile.accountNumber,
                 accountKey = imp.accountKey,
@@ -415,7 +436,7 @@ fun readAllTransactionsFast(
                 persianDateOnly = dateOnly,
                 persianMonthYear = imp.persianMonthYear,
                 persianYear = yearOnly,
-                rawMessage = "رکورد اکسل: ${imp.description}",
+                rawMessage = "رکورد صورت‌حساب: ${imp.description}",
                 userNote = finalNote,
                 category = savedEntity?.category ?: if (autoUnitNote.isNotEmpty()) "شارژ ماهیانه واحدها" else ""
             )

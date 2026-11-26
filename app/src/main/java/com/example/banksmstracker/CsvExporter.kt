@@ -36,7 +36,7 @@ object CsvExporter {
                     TransactionType.UNKNOWN -> "نامشخص"
                 }
                 val balanceText = tx.balance?.toString() ?: ""
-                val sourceText = if (tx.isFromExcel) "اکسل بانکی" else "پیامک"
+                val sourceText = if (tx.isFromExcel) "صورت‌حساب بانکی" else "پیامک"
 
                 val safeScope = escapeCsv(tx.scope)
                 val safeDate = escapeCsv(tx.persianDate)

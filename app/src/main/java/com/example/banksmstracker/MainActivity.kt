@@ -541,7 +541,7 @@ fun HolooSmsAccountingApp(
                                     appDao.saveAccountProfile(profile.copy(scope = newScope))
                                 }
                             },
-                            onImportExcelRecords = { newRecords ->
+                            onImportStatementRecords = { newRecords ->
                                 coroutineScope.launch(Dispatchers.IO) {
                                     appDao.insertImportedRecords(newRecords)
                                     fullReloadFromSms()
@@ -732,7 +732,7 @@ fun DashboardScreen(
                             style = MaterialTheme.typography.titleSmall
                         )
                         Text(
-                            text = "برای بررسی یا بارگذاری فایل اکسل بانک جهت رفع مغایرت لمس کنید.",
+                            text = "برای بررسی یا بارگذاری فایل صورت‌حساب بانک (اکسل/PDF) لمس کنید.",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFF5D4037)
                         )
@@ -1106,7 +1106,7 @@ fun SettingsAndReconciliationScreen(
     onFontScaleChange: (Float) -> Unit,
     onAddCustomScope: (String) -> Unit,
     onChangeAccountScope: (AccountProfileEntity, String) -> Unit,
-    onImportExcelRecords: (List<ImportedRecordEntity>) -> Unit,
+    onImportStatementRecords: (List<ImportedRecordEntity>) -> Unit,
     onDeletePayerMapping: (String) -> Unit,
     onRestoreIgnored: (String) -> Unit
 ) {
@@ -1116,25 +1116,26 @@ fun SettingsAndReconciliationScreen(
         mutableStateOf(accountProfiles.firstOrNull()?.accountKey ?: "")
     }
 
-    val excelPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
+    // انتخاب فایل اکسل (.xls, .xlsx, .csv) یا PDF صورت‌حساب بانک (مانند خروجی همراه بام)
+    val statementPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null && selectedAccountForExcel.isNotEmpty()) {
             try {
-                val imported = ExcelImporter.parseBankStatementCsv(
+                val imported = ExcelImporter.parseBankStatementFile(
                     context = context,
                     uri = uri,
                     targetAccountKey = selectedAccountForExcel,
                     existingTransactions = transactions
                 )
                 if (imported.isEmpty()) {
-                    Toast.makeText(context, "تمام رکوردهای این فایل اکسل قبلاً در پیامک‌ها وجود داشتند!", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "تمام رکوردهای این فایل قبلاً در سیستم وجود داشتند!", Toast.LENGTH_LONG).show()
                 } else {
-                    onImportExcelRecords(imported)
-                    Toast.makeText(context, "${imported.size} تراکنش جاافتاده از فایل اکسل اضافه و مغایرت اصلاح شد!", Toast.LENGTH_LONG).show()
+                    onImportStatementRecords(imported)
+                    Toast.makeText(context, "${imported.size} رکورد جدید از صورت‌حساب اضافه و مغایرت‌ها بررسی شدند!", Toast.LENGTH_LONG).show()
                 }
             } catch (e: Exception) {
-                Toast.makeText(context, "خطا در خواندن فایل CSV: مطمئن شوید فایل با فرمت CSV ذخیره شده است", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "خطا در پردازش فایل: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -1222,11 +1223,11 @@ fun SettingsAndReconciliationScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Rounded.UploadFile, contentDescription = null, tint = Color(0xFF1565C0))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("بارگذاری فایل اکسل (CSV) گردش حساب بانک", style = MaterialTheme.typography.titleSmall)
+                        Text("بارگذاری صورت‌حساب بانکی (اکسل XLS/XLSX/CSV یا PDF)", style = MaterialTheme.typography.titleSmall)
                     }
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "فایل صورت‌حساب CSV دریافتی از اینترنت‌بانک را انتخاب کنید تا تراکنش‌های جاافتاده اضافه و مغایرت‌ها برطرف شوند:",
+                        text = "فایل خروجی همراه بام / اینترنت‌بانک (اکسل یا PDF) را انتخاب کنید تا رکوردهای جاافتاده و شماره کارت واریزکنندگان استخراج و مغایرت‌ها رفع شوند:",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color.Gray
                     )
@@ -1244,13 +1245,13 @@ fun SettingsAndReconciliationScreen(
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         Button(
-                            onClick = { excelPickerLauncher.launch("text/*") },
+                            onClick = { statementPickerLauncher.launch(arrayOf("*/*")) },
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1565C0))
                         ) {
                             Icon(Icons.Rounded.FileUpload, contentDescription = null)
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("انتخاب فایل اکسل (CSV) و رفع مغایرت")
+                            Text("انتخاب فایل اکسل / PDF بانک و رفع مغایرت")
                         }
                     }
                 }
@@ -1402,7 +1403,7 @@ fun TransactionCard(
                     Text(text = "مانده: ${formatCurrency(bal)} ریال", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
                 }
                 if (transaction.payerIdentifier.isNotEmpty()) {
-                    Text(text = "کارت/حساب واریزکننده: ${transaction.payerIdentifier}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF1565C0))
+                    Text(text = "کارت/حساب: ${transaction.payerIdentifier}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF1565C0))
                 }
             }
 

@@ -33,5 +33,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: HamTaraz-v14-Commercial-APK
+          name: HamTaraz-v16-CreditOffsetPro-APK
           path: app/build/outputs/apk/debug/app-debug.apk

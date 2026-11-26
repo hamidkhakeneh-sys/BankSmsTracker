@@ -264,36 +264,26 @@ fun RialAmountTextField(
 // ============================================================================
 fun openSmsInPhoneApp(context: Context, smsId: String, senderAddress: String) {
     try {
-        // تلاش ۱: باز کردن مستقیم همان پیامک با شناسه SMS در Inbox
-        val numericId = smsId.toLongOrNull()
-        if (numericId != null) {
-            val threadId = getSmsThreadId(context, numericId)
-            if (threadId != null && threadId > 0) {
-                val threadUri = Uri.parse("content://mms-sms/conversations/$threadId")
-                val intent = Intent(Intent.ACTION_VIEW, threadUri).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
+        val cleanSender = senderAddress.trim()
+        if (cleanSender.isNotEmpty() && cleanSender != "نامشخص" && !cleanSender.contains("فایل")) {
+            val smsUri = Uri.parse("smsto:${Uri.encode(cleanSender)}")
+            val intent = Intent(Intent.ACTION_SENDTO, smsUri).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            if (intent.resolveActivity(context.packageManager) != null) {
                 context.startActivity(intent)
                 return
             }
         }
-        // تلاش ۲: باز کردن گفتگوی سرشماره بانکی در اپ پیامک گوشی
-        val smsUri = Uri.parse("smsto:${Uri.encode(senderAddress)}")
-        val fallbackIntent = Intent(Intent.ACTION_SENDTO, smsUri).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(fallbackIntent)
-    } catch (e: Exception) {
-        try {
-            val defaultSmsPkg = Telephony.Sms.getDefaultSmsPackage(context)
-            if (defaultSmsPkg != null) {
-                val launchIntent = context.packageManager.getLaunchIntentForPackage(defaultSmsPkg)
-                if (launchIntent != null) {
-                    context.startActivity(launchIntent)
-                }
+        val defaultSmsPkg = Telephony.Sms.getDefaultSmsPackage(context)
+        if (defaultSmsPkg != null) {
+            val launchIntent = context.packageManager.getLaunchIntentForPackage(defaultSmsPkg)
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(launchIntent)
             }
-        } catch (_: Exception) { }
-    }
+        }
+    } catch (_: Exception) { }
 }
 
 private fun getSmsThreadId(context: Context, smsId: Long): Long? {

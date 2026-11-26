@@ -174,7 +174,13 @@ fun InteractiveCategoryDonutChart(
                                 val (catName, amt) = groupedData[selectedSliceIndex]
                                 val pct = ((amt.toDouble() / totalSum.toDouble()) * 100).toInt()
                                 Text(catName, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, maxLines = 1)
-                                Text("$pct%", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = Color(0xFF00695C))
+                                Text(
+                                    text = "${formatCurrency(amt / 10)} تومان",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFF00695C)
+                                )
+                                Text("($pct%)", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                             } else {
                                 Text("جمع کل", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                                 Text(
@@ -215,6 +221,37 @@ fun InteractiveCategoryDonutChart(
                                 }
                                 Text("$pct%", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = color)
                             }
+                        }
+                    }
+                }
+
+                // نمایش باکس مبلغ دقیق به تومان هنگام کلیک روی هر بخش نمودار
+                if (selectedSliceIndex in groupedData.indices) {
+                    val (selName, selAmt) = groupedData[selectedSliceIndex]
+                    val selColor = ChartPalette[selectedSliceIndex % ChartPalette.size]
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Surface(
+                        color = selColor.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "سرفصل انتخابی: $selName",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF091E3A)
+                            )
+                            Text(
+                                text = "${formatCurrency(selAmt / 10)} تومان",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = selColor
+                            )
                         }
                     }
                 }
@@ -513,6 +550,160 @@ fun HierarchicalTimeBarChart(
                     Box(modifier = Modifier.size(10.dp).background(Color(0xFFE53935), CircleShape))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("برداشت (هزینه)", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+    }
+}
+
+
+/**
+ * نمودار و کارت تعاملی موجودی حساب‌های بانکی (تفکیک حساب‌های شخصی از مدیریت ساختمان):
+ * با کلیک روی هر بانک/حساب، تمام نمودارها و تراز مالی داشبورد به همان حساب فیلتر می‌شود.
+ */
+@Composable
+fun BankBalancesInteractiveCard(
+    allTransactions: List<BankTransaction>,
+    selectedAccountKey: String?,
+    onSelectAccountKey: (String?) -> Unit
+) {
+    // محاسبه آخرین موجودی هر حساب بر اساس جدیدترین تراکنش دارای مانده
+    val accountBalances = remember(allTransactions) {
+        allTransactions
+            .groupBy { it.accountKey }
+            .mapNotNull { (accKey, txList) ->
+                val latestWithBal = txList.firstOrNull { it.balance != null }
+                if (latestWithBal != null) {
+                    Triple(accKey, latestWithBal.scope, latestWithBal.balance ?: 0L)
+                } else null
+            }
+            .sortedByDescending { it.third }
+    }
+
+    val personalAccounts = remember(accountBalances) { accountBalances.filter { it.second != "مدیریت ساختمان" } }
+    val buildingAccounts = remember(accountBalances) { accountBalances.filter { it.second == "مدیریت ساختمان" } }
+
+    val personalTotal = remember(personalAccounts) { personalAccounts.sumOf { it.third } }
+    val buildingTotal = remember(buildingAccounts) { buildingAccounts.sumOf { it.third } }
+    val maxBal = remember(accountBalances) { (accountBalances.maxOfOrNull { it.third } ?: 1L).coerceAtLeast(1L) }
+
+    if (accountBalances.isEmpty()) return
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.AccountBalanceWallet, contentDescription = null, tint = Color(0xFF091E3A), modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("موجودی تفکیکی حساب‌ها (کلیک = فیلتر نمودار)", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall, color = Color(0xFF091E3A))
+                }
+                if (selectedAccountKey != null) {
+                    TextButton(
+                        onClick = { onSelectAccountKey(null) },
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                    ) {
+                        Text("همه حساب‌ها", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            // خلاصه جمع موجودی شخصی در برابر موجودی ساختمان
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Surface(
+                    color = Color(0xFFE8EAF6),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text("موجودی حساب‌های شخصی", style = MaterialTheme.typography.labelSmall, color = Color(0xFF1A237E))
+                        Text("${formatCurrency(personalTotal / 10)} تومان", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.ExtraBold, color = Color(0xFF091E3A))
+                    }
+                }
+                Surface(
+                    color = Color(0xFFE0F2F1),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text("موجودی حساب ساختمان", style = MaterialTheme.typography.labelSmall, color = Color(0xFF004D40))
+                        Text("${formatCurrency(buildingTotal / 10)} تومان", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.ExtraBold, color = Color(0xFF00695C))
+                    }
+                }
+            }
+
+            // نمودار میله‌ای افقی موجودی تک‌تک حساب‌ها
+            accountBalances.forEach { (accKey, scope, bal) ->
+                val isSelected = selectedAccountKey == accKey
+                val isBuilding = scope == "مدیریت ساختمان"
+                val barColor = if (isBuilding) Color(0xFF00897B) else Color(0xFF1E88E5)
+                val ratio = (bal.toFloat() / maxBal.toFloat()).coerceIn(0.04f, 1f)
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (isSelected) barColor.copy(alpha = 0.14f) else Color(0xFFF8FAFC))
+                        .then(
+                            if (isSelected) Modifier.border(1.5.dp, barColor, RoundedCornerShape(10.dp))
+                            else Modifier
+                        )
+                        .clickable { onSelectAccountKey(if (isSelected) null else accKey) }
+                        .padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Text(accKey, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Color(0xFF091E3A))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(
+                                color = if (isBuilding) Color(0xFFB2DFDB) else Color(0xFFC5CAE9),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = if (isBuilding) "ساختمان" else "شخصی",
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF091E3A)
+                                )
+                            }
+                        }
+                        Text(
+                            text = "${formatCurrency(bal / 10)} تومان",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = barColor
+                        )
+                    }
+
+                    // نوار پیشرفت نموداری موجودی
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(8.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Color(0xFFE2E8F0))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(ratio)
+                                .fillMaxHeight()
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(barColor)
+                        )
+                    }
                 }
             }
         }

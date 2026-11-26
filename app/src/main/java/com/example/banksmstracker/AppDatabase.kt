@@ -72,11 +72,13 @@ data class UnitChargeEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val unitId: Int,
     val amount: Long,
+    val creditApplied: Long = 0L,
+    val remainingBalance: Long? = null,
     val title: String,
     val persianDate: String,
     val persianMonthYear: String,
     val timestampMillis: Long,
-    val isAutoMonthly: Boolean = false // مشخص می‌کند که این بدهی به‌صورت خودکار در روز ۱ ماه صادر شده است
+    val isAutoMonthly: Boolean = false
 )
 
 @Entity(tableName = "imported_bank_records")
@@ -228,7 +230,7 @@ interface AppDao {
         CategoryEntity::class,
         AppSettingEntity::class
     ],
-    version = 13,
+    version = 16,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -264,7 +266,7 @@ abstract class AppDatabase : RoomDatabase() {
                 val builder = Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
-                    "hamtaraz_encrypted_v14_db"
+                    "hamtaraz_encrypted_v16_db"
                 ).fallbackToDestructiveMigration()
 
                 if (passphrase != null && passphrase.isNotEmpty()) {

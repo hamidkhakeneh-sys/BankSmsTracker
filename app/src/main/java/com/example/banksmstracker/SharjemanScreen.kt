@@ -96,7 +96,9 @@ fun SharjemanBuildingScreen(
 
     val unitSummaries = remember(units, unitCharges, manualEntries, buildingTransactions) {
         units.map { unit ->
-            val chargesSum = unitCharges.filter { it.unitId == unit.id }.sumOf { it.amount }
+            val chargesSum = unitCharges
+                .filter { it.unitId == unit.id }
+                .sumOf { ch -> (ch.remainingBalance ?: (ch.amount - ch.creditApplied)).coerceAtLeast(0L) }
             val smsPaymentsSum = buildingTransactions
                 .filter { it.unitId == unit.id && it.type == TransactionType.DEPOSIT }
                 .sumOf { it.amount }
@@ -709,6 +711,9 @@ fun SharjemanBuildingScreen(
     if (showDebtDialog) {
         DeclareBuildingDebtDialog(
             units = units,
+            unitCharges = unitCharges,
+            manualEntries = manualEntries,
+            buildingTransactions = buildingTransactions,
             onDismiss = { showDebtDialog = false },
             onConfirmCharges = { chargesList ->
                 onDeclareDebtBatch(chargesList)
@@ -849,15 +854,95 @@ fun SharjemanBuildingScreen(
             },
             text = {
                 LazyColumn(modifier = Modifier.heightIn(max = 380.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // بخش کسر مبلغ از بستانکاری واحد (ثبت بدهی / تسویه از محل بستانکاری)
+                    item {
+                        var showDeductBox by remember { mutableStateOf(false) }
+                        var deductTitle by remember { mutableStateOf("") }
+                        var deductDigits by remember { mutableStateOf("") }
+
+                        OutlinedButton(
+                            onClick = { showDeductBox = !showDeductBox },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFC62828))
+                        ) {
+                            Icon(Icons.Rounded.RemoveCircleOutline, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("کسر مبلغ از بستانکاری / ثبت بدهی برای این واحد", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        }
+
+                        if (showDeductBox) {
+                            Surface(color = Color(0xFFFFF8E1), shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    OutlinedTextField(
+                                        value = deductTitle,
+                                        onValueChange = { deductTitle = it },
+                                        label = { Text("بابت (مثلاً: کسر از بستانکاری بابت شارژ / جریمه)", style = MaterialTheme.typography.labelSmall) },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    RialAmountTextField(
+                                        rawDigitsValue = deductDigits,
+                                        onValueChange = { deductDigits = it },
+                                        label = "مبلغ کسری"
+                                    )
+                                    Button(
+                                        onClick = {
+                                            val amt = deductDigits.toLongOrNull() ?: 0L
+                                            if (amt > 0L) {
+                                                val now = System.currentTimeMillis()
+                                                val pDate = PersianDate(now)
+                                                onDeclareDebtBatch(
+                                                    listOf(
+                                                        UnitChargeEntity(
+                                                            unitId = summary.unit.id,
+                                                            amount = amt,
+                                                            title = deductTitle.trim().ifEmpty { "کسر از بستانکاری واحد" },
+                                                            persianDate = PersianDateFormat("Y/m/d").format(pDate),
+                                                            persianMonthYear = PersianDateFormat("Y/m").format(pDate),
+                                                            timestampMillis = now
+                                                        )
+                                                    )
+                                                )
+                                                deductTitle = ""
+                                                deductDigits = ""
+                                                showDeductBox = false
+                                                Toast.makeText(context, "مبلغ از بستانکاری واحد کسر شد", Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFC62828)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text("تایید و کسر از بستانکاری واحد", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     item {
                         Text("بدهکاری‌های ثبت‌شده (${chargesForUnit.size}):", style = MaterialTheme.typography.labelMedium, color = Color(0xFFE53935), fontWeight = FontWeight.Bold)
                     }
                     items(chargesForUnit) { ch ->
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("${ch.title} (${ch.persianDate})", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-                            Text("-${formatCurrency(ch.amount)}", color = Color(0xFFE53935), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
-                            IconButton(onClick = { onDeleteCharge(ch.id) }, modifier = Modifier.size(24.dp)) {
-                                Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(14.dp), tint = Color.Gray)
+                        val remDebt = (ch.remainingBalance ?: (ch.amount - ch.creditApplied)).coerceAtLeast(0L)
+                        Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                Text("${ch.title} (${ch.persianDate})", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                                Text(
+                                    text = "مانده بدهی: ${formatCurrency(remDebt)}",
+                                    color = if (remDebt > 0L) Color(0xFFE53935) else Color(0xFF00897B),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                IconButton(onClick = { onDeleteCharge(ch.id) }, modifier = Modifier.size(24.dp)) {
+                                    Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(14.dp), tint = Color.Gray)
+                                }
+                            }
+                            if (ch.creditApplied > 0L) {
+                                Text(
+                                    text = "مبلغ کل: ${formatCurrency(ch.amount)} • بستانکاری کسرشده: ${formatCurrency(ch.creditApplied)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF00695C)
+                                )
                             }
                         }
                     }
@@ -1270,6 +1355,9 @@ fun ManualFundEntryDialog(
 @Composable
 fun DeclareBuildingDebtDialog(
     units: List<BuildingUnitEntity>,
+    unitCharges: List<UnitChargeEntity> = emptyList(),
+    manualEntries: List<ManualBuildingEntryEntity> = emptyList(),
+    buildingTransactions: List<BankTransaction> = emptyList(),
     onDismiss: () -> Unit,
     onConfirmCharges: (List<UnitChargeEntity>) -> Unit
 ) {
@@ -1312,23 +1400,53 @@ fun DeclareBuildingDebtDialog(
                     )
                 }
 
+                val currentCreditByUnit = remember(units, unitCharges, manualEntries, buildingTransactions) {
+                    UnitCreditAccountingEngine.computeAvailableCreditPerUnit(units, unitCharges, manualEntries, buildingTransactions)
+                }
+
                 Text("واحدهای مشمول (${selectedUnitIds.size} واحد):", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                 units.forEach { u ->
                     val isChecked = selectedUnitIds.contains(u.id)
-                    Row(
+                    val availCredit = currentCreditByUnit[u.id] ?: 0L
+                    val baseCharge = if (splitMode == 0) u.monthlyCharge else {
+                        val tot = totalAmountDigits.toLongOrNull() ?: 0L
+                        val targetList = units.filter { selectedUnitIds.contains(it.id) }
+                        if (targetList.isEmpty() || tot == 0L) 0L else when (splitMode) {
+                            1 -> tot / targetList.size
+                            2 -> ((u.areaSqm.coerceAtLeast(1) / targetList.sumOf { it.areaSqm.coerceAtLeast(1) }.toDouble()) * tot).toLong()
+                            else -> ((u.residentCount.coerceAtLeast(1) / targetList.sumOf { it.residentCount.coerceAtLeast(1) }.toDouble()) * tot).toLong()
+                        }
+                    }
+                    val deductedPreview = minOf(availCredit, baseCharge)
+                    val remDebtPreview = (baseCharge - deductedPreview).coerceAtLeast(0L)
+
+                    Column(
                         modifier = Modifier.fillMaxWidth().clickable {
                             selectedUnitIds = if (isChecked) selectedUnitIds - u.id else selectedUnitIds + u.id
-                        },
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        }.padding(vertical = 2.dp)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = isChecked, onCheckedChange = {
-                                selectedUnitIds = if (isChecked) selectedUnitIds - u.id else selectedUnitIds + u.id
-                            })
-                            Text("${u.unitNumber} (${u.residentName})", style = MaterialTheme.typography.bodySmall)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(checked = isChecked, onCheckedChange = {
+                                    selectedUnitIds = if (isChecked) selectedUnitIds - u.id else selectedUnitIds + u.id
+                                })
+                                Text("${u.unitNumber} (${u.residentName})", style = MaterialTheme.typography.bodySmall)
+                            }
+                            Text("${u.areaSqm}m² | ${u.residentCount}نفر", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                         }
-                        Text("${u.areaSqm}m² | ${u.residentCount}نفر", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                        if (availCredit > 0L && baseCharge > 0L) {
+                            Text(
+                                text = "بستانکاری موجود: ${formatCurrency(availCredit)} • کسر: ${formatCurrency(deductedPreview)} • مانده بدهی: ${formatCurrency(remDebtPreview)} ریال",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF00695C),
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(start = 36.dp)
+                            )
+                        }
                     }
                 }
             }

@@ -137,9 +137,9 @@ object IranBankSmsParser {
         "موسسه اعتباری ملل"
     )
 
-    // استخراج شماره حساب بدون برچسب (مثلاً 361970003195155001 در سطر اول یا هر سطر مستقل پیامک)
+    // استخراج شماره حساب بدون برچسب (در سطر اول یا هر سطر مستقل پیامک، حتی اگر کاراکتر مخفی RTL/LTR داشته باشد)
     private val standaloneAccountRegex = Regex(
-        """(?m)^\s*(\d[\d.\-]{8,23})\s*$"""
+        """(?m)^[\s\u200C\u200E\u200F]*(\d[\d.\-]{8,23})[\s\u200C\u200E\u200F]*$"""
     )
 
     private val payerCardOrAccRegex = Regex(
@@ -167,8 +167,10 @@ object IranBankSmsParser {
         val balanceMatch = balanceRegex.find(body) ?: return null
         val balanceAmount = balanceMatch.groupValues[1].replace(",", "").toLongOrNull()
 
+        val firstLine = body.lines().firstOrNull { it.trim().isNotEmpty() }?.trim() ?: ""
+        val firstLineDigits = Regex("""^(\d[\d.\-]{8,23})$""").find(firstLine)?.groupValues?.get(1)
         val accMatch = labeledAccountRegex.find(body) ?: standaloneAccountRegex.find(body)
-        val rawAcc = accMatch?.groupValues?.get(1)?.trim() ?: ""
+        val rawAcc = (accMatch?.groupValues?.get(1)?.trim() ?: firstLineDigits ?: "")
         val digitsOnlyAcc = rawAcc.replace(Regex("""[^\d]"""), "")
         val cleanAcc = when {
             digitsOnlyAcc.length >= 10 -> {
@@ -429,8 +431,13 @@ fun readAllTransactionsFast(
 
             IranBankSmsParser.parseSms(id, sender, body, dateMillis)?.let { parsedTx ->
                 // اعمال نگاشت دستی شماره حساب به بانک (در صورتی که کاربر قبلاً این شماره حساب را به بانکی متصل کرده باشد)
+                val rawDigitsOnly = parsedTx.rawAccountNumber.replace(Regex("""[^\d]"""), "")
                 val mappedBank = accountBankMappings[parsedTx.rawAccountNumber]
                     ?: accountBankMappings[parsedTx.accountNumber]
+                    ?: accountBankMappings.entries.firstOrNull { (k, _) ->
+                        val kDigits = k.replace(Regex("""[^\d]"""), "")
+                        kDigits.isNotEmpty() && (kDigits == rawDigitsOnly || (kDigits.length >= 6 && rawDigitsOnly.contains(kDigits)))
+                    }?.value
                 val tx = if (mappedBank != null) {
                     val newKey = "$mappedBank - ${parsedTx.accountNumber}"
                     parsedTx.copy(bankName = mappedBank, accountKey = newKey)
@@ -552,11 +559,16 @@ fun readAllTransactionsFast(
 
         if (matchingSmsIndex != -1) {
             val existingSms = rawTransactions[matchingSmsIndex]
-            val mergedPayer = existingSms.payerIdentifier.ifBlank { imp.payerIdentifier }
+            val mergedPayer = imp.payerIdentifier.ifBlank { existingSms.payerIdentifier }
             val autoMapping = if (mergedPayer.isNotEmpty()) payerMappings[mergedPayer] else null
             val resolvedUnitId = existingSms.unitId ?: autoMapping?.unitId
             val autoUnit = autoMapping?.unitTitle ?: ""
-            val mergedNote = existingSms.userNote.ifBlank { autoUnit.ifBlank { imp.description } }
+            val mergedNote = when {
+                existingSms.userNote.isNotBlank() && existingSms.userNote != "انتقال وجه بانکی" && existingSms.userNote != "خرید با کارت (کارتخوان)" -> existingSms.userNote
+                autoUnit.isNotBlank() -> autoUnit
+                imp.description.isNotBlank() -> imp.description
+                else -> existingSms.userNote
+            }
             val mergedCat = existingSms.category.ifBlank {
                 if (resolvedUnitId != null && existingSms.scope == "مدیریت ساختمان") "شارژ ماهیانه واحدها" else ""
             }
@@ -564,7 +576,8 @@ fun readAllTransactionsFast(
                 payerIdentifier = mergedPayer,
                 unitId = resolvedUnitId,
                 userNote = mergedNote,
-                category = mergedCat
+                category = mergedCat,
+                isFromExcel = true
             )
             continue
         }

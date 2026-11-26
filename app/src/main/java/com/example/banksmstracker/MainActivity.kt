@@ -206,6 +206,7 @@ fun HolooSmsAccountingApp(
     var chartViewMode by remember { mutableStateOf(ChartViewMode.YEARLY_DRILLDOWN) }
     var dashboardSelectedYear by remember(selectedScope) { mutableStateOf<String?>(null) }
     var dashboardSelectedMonth by remember(selectedScope) { mutableStateOf<String?>(null) }
+    var dashboardSelectedAccount by remember(selectedScope) { mutableStateOf<String?>(null) }
 
     var selectedTransaction by remember { mutableStateOf<BankTransaction?>(null) }
     var showCategoryManager by remember { mutableStateOf(false) }
@@ -226,13 +227,20 @@ fun HolooSmsAccountingApp(
         }
     }
 
-    // تراکنش‌های فیلترشده صفحه اول بر اساس سال یا ماه انتخاب‌شده در نمودار
-    val dashboardDisplayTransactions by remember(scopedTransactions, dashboardSelectedYear, dashboardSelectedMonth) {
+    val dashboardAccountFilteredBase by remember(scopedTransactions, dashboardSelectedAccount) {
+        derivedStateOf {
+            if (dashboardSelectedAccount == null) scopedTransactions
+            else scopedTransactions.filter { it.accountKey == dashboardSelectedAccount }
+        }
+    }
+
+    // تراکنش‌های فیلترشده صفحه اول بر اساس بانک/حساب، سال یا ماه انتخاب‌شده در نمودار
+    val dashboardDisplayTransactions by remember(dashboardAccountFilteredBase, dashboardSelectedYear, dashboardSelectedMonth) {
         derivedStateOf {
             when {
-                dashboardSelectedMonth != null -> scopedTransactions.filter { it.persianMonthYear == dashboardSelectedMonth }
-                dashboardSelectedYear != null -> scopedTransactions.filter { it.persianYear == dashboardSelectedYear }
-                else -> scopedTransactions
+                dashboardSelectedMonth != null -> dashboardAccountFilteredBase.filter { it.persianMonthYear == dashboardSelectedMonth }
+                dashboardSelectedYear != null -> dashboardAccountFilteredBase.filter { it.persianYear == dashboardSelectedYear }
+                else -> dashboardAccountFilteredBase
             }
         }
     }
@@ -355,7 +363,14 @@ fun HolooSmsAccountingApp(
                     }
 
                     if (missingAutoCharges.isNotEmpty()) {
-                        appDao.insertUnitCharges(missingAutoCharges)
+                        val adjustedAutoCharges = UnitCreditAccountingEngine.applyExistingCreditToNewCharges(
+                            draftCharges = missingAutoCharges,
+                            units = loadedUnits,
+                            existingCharges = loadedCharges,
+                            manualEntries = appDao.getAllManualBuildingEntries(),
+                            buildingTransactions = emptyList()
+                        )
+                        appDao.insertUnitCharges(adjustedAutoCharges)
                         loadedCharges = appDao.getAllUnitCharges()
                     }
                 }
@@ -621,8 +636,11 @@ fun HolooSmsAccountingApp(
                 else -> {
                     when (bottomTabIndex) {
                         0 -> DashboardScreen(
-                            allScopedTransactions = scopedTransactions,
+                            allSystemTransactions = allTransactions,
+                            allScopedTransactions = dashboardAccountFilteredBase,
                             displayTransactions = dashboardDisplayTransactions,
+                            selectedAccountKey = dashboardSelectedAccount,
+                            onSelectAccountKey = { dashboardSelectedAccount = it },
                             viewMode = chartViewMode,
                             onViewModeChange = { newMode ->
                                 chartViewMode = newMode
@@ -722,7 +740,14 @@ fun HolooSmsAccountingApp(
                             },
                             onDeclareDebtBatch = { chargesList ->
                                 coroutineScope.launch(Dispatchers.IO) {
-                                    appDao.insertUnitCharges(chargesList)
+                                    val adjustedCharges = UnitCreditAccountingEngine.applyExistingCreditToNewCharges(
+                                        draftCharges = chargesList,
+                                        units = buildingUnits,
+                                        existingCharges = appDao.getAllUnitCharges(),
+                                        manualEntries = appDao.getAllManualBuildingEntries(),
+                                        buildingTransactions = buildingTransactions
+                                    )
+                                    appDao.insertUnitCharges(adjustedCharges)
                                     unitCharges = appDao.getAllUnitCharges()
                                 }
                             },
@@ -866,10 +891,17 @@ fun HolooSmsAccountingApp(
                 },
                 onSplitBuildingExpense = { generatedCharges ->
                     coroutineScope.launch(Dispatchers.IO) {
-                        appDao.insertUnitCharges(generatedCharges)
+                        val adjustedCharges = UnitCreditAccountingEngine.applyExistingCreditToNewCharges(
+                            draftCharges = generatedCharges,
+                            units = buildingUnits,
+                            existingCharges = appDao.getAllUnitCharges(),
+                            manualEntries = appDao.getAllManualBuildingEntries(),
+                            buildingTransactions = buildingTransactions
+                        )
+                        appDao.insertUnitCharges(adjustedCharges)
                         unitCharges = appDao.getAllUnitCharges()
                     }
-                    Toast.makeText(context, "مبلغ هزینه بین ${generatedCharges.size} واحد تقسیم و بدهکار شد", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "مبلغ هزینه بین ${generatedCharges.size} واحد تقسیم و بستانکاری‌های موجود اعمال شد", Toast.LENGTH_LONG).show()
                 },
                 onSave = { newCategory, newNote, transferOverride, selectedUnitId, assignUnitToPayerCard, receiptPath ->
                     val targetPayer = currentTx.payerIdentifier
@@ -999,8 +1031,11 @@ fun HolooSmsAccountingApp(
 // ============================================================================
 @Composable
 fun DashboardScreen(
+    allSystemTransactions: List<BankTransaction>,
     allScopedTransactions: List<BankTransaction>,
     displayTransactions: List<BankTransaction>,
+    selectedAccountKey: String?,
+    onSelectAccountKey: (String?) -> Unit,
     viewMode: ChartViewMode,
     onViewModeChange: (ChartViewMode) -> Unit,
     selectedYear: String?,
@@ -1162,6 +1197,13 @@ fun DashboardScreen(
                 }
             }
         }
+
+        // نمودار و کارت موجودی حساب‌های بانکی (تفکیک شخصی از ساختمان + فیلتر با کلیک روی هر بانک)
+        BankBalancesInteractiveCard(
+            allTransactions = allSystemTransactions,
+            selectedAccountKey = selectedAccountKey,
+            onSelectAccountKey = onSelectAccountKey
+        )
 
         // نمودار سلسله‌مراتبی سالانه -> ماهانه با کلیک روی ستون‌ها
         HierarchicalTimeBarChart(
@@ -2242,8 +2284,20 @@ fun TransactionDetailDialog(
         },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                Text("${transaction.accountKey} • ${formatCurrency(transaction.amount)} ریال", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                Text("حساب شما: ${transaction.accountKey} • ${formatCurrency(transaction.amount)} ریال", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
                 Text("تاریخ: ${transaction.persianDate}", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                if (transaction.payerIdentifier.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Surface(color = Color(0xFFE3F2FD), shape = RoundedCornerShape(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "شماره کارت / حساب طرف مقابل (واریزکننده): ${transaction.payerIdentifier}",
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF0D47A1)
+                        )
+                    }
+                }
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Surface(
@@ -2315,9 +2369,14 @@ fun TransactionDetailDialog(
                     }
 
                     if (showInlineBankPicker) {
+                        val fallbackExtractedAcc = remember(transaction.rawAccountNumber, transaction.rawMessage) {
+                            transaction.rawAccountNumber.ifBlank {
+                                Regex("""\d[\d.\-]{8,23}""").find(IranBankSmsParser.normalizePersian(transaction.rawMessage))?.value ?: ""
+                            }
+                        }
                         AccountToBankPickerDialog(
-                            discoveredAccountNumbers = listOfNotNull(transaction.rawAccountNumber.takeIf { it.isNotBlank() }),
-                            initialAccount = transaction.rawAccountNumber,
+                            discoveredAccountNumbers = listOfNotNull(fallbackExtractedAcc.takeIf { it.isNotBlank() }),
+                            initialAccount = fallbackExtractedAcc,
                             onDismiss = { showInlineBankPicker = false },
                             onConfirm = { accNum, chosenBank ->
                                 showInlineBankPicker = false
@@ -2597,15 +2656,35 @@ fun CategoryManagerDialog(
     var isExpense by remember { mutableStateOf(true) }
     var selectedScope by remember { mutableStateOf("شخصی") }
 
+    // فیلتر کردن لیست پایین دقیقاً بر اساس دکمه «مخصوص شخصی» یا «مخصوص ساختمان»
+    val filteredCategoryList = remember(categories, selectedScope) {
+        categories.filter { it.scope == selectedScope }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("مدیریت سرفصل‌های مجزای شخصی و ساختمان", style = MaterialTheme.typography.titleMedium) },
         text = {
             Column {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    FilterChip(
+                        selected = selectedScope == "شخصی",
+                        onClick = { selectedScope = "شخصی" },
+                        label = { Text("مخصوص شخصی", style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilterChip(
+                        selected = selectedScope == "مدیریت ساختمان",
+                        onClick = { selectedScope = "مدیریت ساختمان" },
+                        label = { Text("مخصوص ساختمان", style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
                 OutlinedTextField(
                     value = newName,
                     onValueChange = { newName = it },
-                    label = { Text("نام سرفصل جدید") },
+                    label = { Text("نام سرفصل جدید برای $selectedScope") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -2614,18 +2693,6 @@ fun CategoryManagerDialog(
                     Text("هزینه", style = MaterialTheme.typography.bodySmall)
                     RadioButton(selected = !isExpense, onClick = { isExpense = false })
                     Text("درآمد", style = MaterialTheme.typography.bodySmall)
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    FilterChip(
-                        selected = selectedScope == "شخصی",
-                        onClick = { selectedScope = "شخصی" },
-                        label = { Text("مخصوص شخصی", style = MaterialTheme.typography.labelSmall) }
-                    )
-                    FilterChip(
-                        selected = selectedScope == "مدیریت ساختمان",
-                        onClick = { selectedScope = "مدیریت ساختمان" },
-                        label = { Text("مخصوص ساختمان", style = MaterialTheme.typography.labelSmall) }
-                    )
                     Spacer(modifier = Modifier.weight(1f))
                     Button(onClick = {
                         val t = newName.trim()
@@ -2637,8 +2704,9 @@ fun CategoryManagerDialog(
                 }
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                LazyColumn(modifier = Modifier.heightIn(max = 220.dp)) {
-                    items(categories) { cat ->
+                Text("لیست سرفصل‌های $selectedScope (${filteredCategoryList.size}):", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                LazyColumn(modifier = Modifier.heightIn(max = 210.dp)) {
+                    items(filteredCategoryList) { cat ->
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,

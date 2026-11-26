@@ -33,5 +33,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: HamTaraz-v18-BuildFixed-APK
+          name: HamTaraz-v19-UltimatePro-APK
           path: app/build/outputs/apk/debug/app-debug.apk

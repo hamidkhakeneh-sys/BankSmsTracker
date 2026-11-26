@@ -864,25 +864,32 @@ fun HolooSmsAccountingApp(
                                 }
                             },
                             onSaveAccountBankMapping = { rawAcc, selectedBank ->
+                                val rawDigits = rawAcc.replace(Regex("""[^\d]"""), "")
+                                val coreDigits = if (rawDigits.length >= 15) rawDigits.drop(7).take(7) else rawDigits.takeLast(7)
+
+                                val updatedRawList = allTransactions.map { tx ->
+                                    val txDigits = tx.rawAccountNumber.replace(Regex("""[^\d]"""), "")
+                                    val matchesAcc = (rawAcc.isNotEmpty() && tx.rawAccountNumber == rawAcc) ||
+                                            (coreDigits.isNotEmpty() && (tx.accountNumber == coreDigits || txDigits.contains(coreDigits))) ||
+                                            (rawDigits.isNotEmpty() && txDigits == rawDigits)
+                                    if (matchesAcc) {
+                                        tx.copy(
+                                            bankName = selectedBank,
+                                            accountKey = "$selectedBank - ${tx.accountNumber}"
+                                        )
+                                    } else tx
+                                }
+                                val profilesMap = accountProfiles.associateBy { it.accountKey }
+                                val (recomputedTxs, recomputedProfiles) = IranBankSmsParser.recomputeBankAccountRoles(updatedRawList, profilesMap)
+                                allTransactions = recomputedTxs
+                                accountProfiles = recomputedProfiles
+
                                 coroutineScope.launch(Dispatchers.IO) {
                                     appDao.saveAccountBankMapping(AccountBankMappingEntity(rawAcc, selectedBank))
-                                    val oldProfiles = appDao.getAllAccountProfiles()
-                                    val rawDigits = rawAcc.replace(Regex("""[^\d]"""), "")
-                                    val coreDigits = if (rawDigits.length >= 15) rawDigits.drop(7).take(7) else rawDigits.takeLast(7)
-                                    val matchingOld = oldProfiles.firstOrNull {
-                                        it.accountNumber == coreDigits || it.accountNumber == rawDigits || it.accountKey.contains(coreDigits)
+                                    if (coreDigits.isNotEmpty() && coreDigits != rawAcc) {
+                                        appDao.saveAccountBankMapping(AccountBankMappingEntity(coreDigits, chosenBank = selectedBank))
                                     }
-                                    if (matchingOld != null) {
-                                        val newKey = "$selectedBank - ${matchingOld.accountNumber}"
-                                        appDao.saveAccountProfile(
-                                            matchingOld.copy(
-                                                accountKey = newKey,
-                                                bankName = selectedBank,
-                                                customTitle = newKey
-                                            )
-                                        )
-                                    }
-                                    fullReloadFromSms()
+                                    recomputedProfiles.forEach { appDao.saveAccountProfile(it) }
                                 }
                             },
                             onDeleteAccountBankMapping = { rawAcc ->
@@ -908,28 +915,53 @@ fun HolooSmsAccountingApp(
                 transaction = currentTx,
                 categories = categories,
                 buildingUnits = buildingUnits,
+                allTransactionsForSuggestions = allTransactions,
                 onDismiss = { selectedTransaction = null },
+                onMultiUnitCreditSplit = { creditEntries, extraMappings ->
+                    coroutineScope.launch(Dispatchers.IO) {
+                        if (creditEntries.isNotEmpty()) {
+                            appDao.insertManualBuildingEntries(creditEntries)
+                            manualBuildingEntries = appDao.getAllManualBuildingEntries()
+                        }
+                        if (extraMappings.isNotEmpty()) {
+                            extraMappings.forEach { appDao.savePayerMapping(it) }
+                            fullReloadFromSms()
+                        }
+                    }
+                    if (creditEntries.isNotEmpty()) {
+                        Toast.makeText(context, "مبلغ بین ${creditEntries.size} واحد تقسیم و از بدهی آن‌ها کسر شد", Toast.LENGTH_LONG).show()
+                    }
+                },
                 onAssignAccountToBank = { rawAccKey, chosenBank ->
                     selectedTransaction = null
+                    val rawDigits = rawAccKey.replace(Regex("""[^\d]"""), "")
+                    val coreDigits = if (rawDigits.length >= 15) rawDigits.drop(7).take(7) else rawDigits.takeLast(7)
+
+                    // ۱. به‌روزرسانی فوری در حافظه زنده (0ms) تا کاربر بلافاصله تغییر بانک و گروه‌بندی را ببیند
+                    val updatedRawList = allTransactions.map { tx ->
+                        val txDigits = tx.rawAccountNumber.replace(Regex("""[^\d]"""), "")
+                        val matchesAcc = (rawAccKey.isNotEmpty() && tx.rawAccountNumber == rawAccKey) ||
+                                (coreDigits.isNotEmpty() && (tx.accountNumber == coreDigits || txDigits.contains(coreDigits))) ||
+                                (rawDigits.isNotEmpty() && txDigits == rawDigits)
+                        if (matchesAcc) {
+                            tx.copy(
+                                bankName = chosenBank,
+                                accountKey = "$chosenBank - ${tx.accountNumber}"
+                            )
+                        } else tx
+                    }
+                    val profilesMap = accountProfiles.associateBy { it.accountKey }
+                    val (recomputedTxs, recomputedProfiles) = IranBankSmsParser.recomputeBankAccountRoles(updatedRawList, profilesMap)
+                    allTransactions = recomputedTxs
+                    accountProfiles = recomputedProfiles
+
+                    // ۲. ذخیره دائمی در دیتابیس
                     coroutineScope.launch(Dispatchers.IO) {
                         appDao.saveAccountBankMapping(AccountBankMappingEntity(rawAccKey, chosenBank))
-                        val oldProfiles = appDao.getAllAccountProfiles()
-                        val rawDigits = rawAccKey.replace(Regex("""[^\d]"""), "")
-                        val coreDigits = if (rawDigits.length >= 15) rawDigits.drop(7).take(7) else rawDigits.takeLast(7)
-                        val matchingOld = oldProfiles.firstOrNull {
-                            it.accountNumber == coreDigits || it.accountNumber == rawDigits || it.accountKey.contains(coreDigits)
+                        if (coreDigits.isNotEmpty() && coreDigits != rawAccKey) {
+                            appDao.saveAccountBankMapping(AccountBankMappingEntity(coreDigits, chosenBank))
                         }
-                        if (matchingOld != null) {
-                            val newKey = "$chosenBank - ${matchingOld.accountNumber}"
-                            appDao.saveAccountProfile(
-                                matchingOld.copy(
-                                    accountKey = newKey,
-                                    bankName = chosenBank,
-                                    customTitle = newKey
-                                )
-                            )
-                        }
-                        fullReloadFromSms()
+                        recomputedProfiles.forEach { appDao.saveAccountProfile(it) }
                     }
                     Toast.makeText(context, "شماره حساب به «$chosenBank» متصل شد و تمام پیامک‌های مرتبط به‌روز شدند", Toast.LENGTH_LONG).show()
                 },
@@ -2291,9 +2323,11 @@ fun TransactionDetailDialog(
     transaction: BankTransaction,
     categories: List<CategoryEntity>,
     buildingUnits: List<BuildingUnitEntity>,
+    allTransactionsForSuggestions: List<BankTransaction> = emptyList(),
     onDismiss: () -> Unit,
     onAssignAccountToBank: (String, String) -> Unit = { _, _ -> },
     onSplitBuildingExpense: (List<UnitChargeEntity>) -> Unit = {},
+    onMultiUnitCreditSplit: (List<ManualBuildingEntryEntity>, List<PayerUnitMappingEntity>) -> Unit = { _, _ -> },
     onSave: (String, String, Boolean?, Int?, Boolean, Boolean, String) -> Unit,
     onMarkAsNotBankSms: (Boolean) -> Unit,
     onAddNewCategory: (String) -> Unit
@@ -2301,16 +2335,33 @@ fun TransactionDetailDialog(
     val context = LocalContext.current
     var noteText by remember { mutableStateOf(transaction.userNote) }
     var selectedCategory by remember { mutableStateOf(transaction.category) }
-    var selectedUnitId by remember { mutableStateOf(transaction.unitId) }
+    var selectedUnitIds by remember {
+        mutableStateOf(if (transaction.unitId != null) setOf(transaction.unitId) else emptySet())
+    }
     var applyToBuildingAccounting by remember { mutableStateOf(true) }
+    var multiUnitSplitMode by remember { mutableIntStateOf(0) } // 0: تقسیم مساوی مبلغ کل، 1: بر اساس متراژ، 2: بر اساس نفرات، 3: مبلغ کامل برای هر واحد
+    var extraCardsForUnitText by remember { mutableStateOf("") }
+
     var receiptPath by remember { mutableStateOf(transaction.receiptImagePath) }
     var isInternalTransfer by remember { mutableStateOf(transaction.type == TransactionType.INTERNAL) }
     var splitExpenseAmongUnits by remember { mutableStateOf(false) }
-    var expenseSplitMode by remember { mutableIntStateOf(0) } // 0: مساوی، 1: متراژ، 2: نفرات
+    var expenseSplitMode by remember { mutableIntStateOf(0) }
     var assignUnitToAllPayerDeposits by remember { mutableStateOf(transaction.payerIdentifier.isNotEmpty() && transaction.type == TransactionType.DEPOSIT) }
     var showQuickAddCategory by remember { mutableStateOf(false) }
     var quickNewCatName by remember { mutableStateOf("") }
     var showWrongDetectionConfirm by remember { mutableStateOf(false) }
+
+    // شناسایی سایر کارت‌ها/حساب‌های احتمالی مرتبط با همین شخص از روی نام واریزکننده در فایل اکسل
+    val suggestedRelatedCards = remember(transaction.payerIdentifier, transaction.userNote, allTransactionsForSuggestions) {
+        val personHint = transaction.userNote.substringAfter("•", "").trim()
+        if (personHint.length >= 3) {
+            allTransactionsForSuggestions
+                .filter { it.payerIdentifier.isNotBlank() && it.payerIdentifier != transaction.payerIdentifier && it.userNote.contains(personHint) }
+                .map { it.payerIdentifier }
+                .distinct()
+        } else emptyList()
+    }
+    var selectedRelatedCards by remember(suggestedRelatedCards) { mutableStateOf(suggestedRelatedCards.toSet()) }
 
     val relevantCategories = remember(categories, transaction.scope, transaction.type) {
         val targetScope = if (transaction.scope == "مدیریت ساختمان") "مدیریت ساختمان" else "شخصی"
@@ -2382,22 +2433,39 @@ fun TransactionDetailDialog(
         },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                Text("حساب شما: ${transaction.accountKey} • ${formatCurrency(transaction.amount)} ریال", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
-                Text("تاریخ: ${transaction.persianDate}", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                // نمایش مجزا و شفافِ «شماره کارت/حساب فرد واریزکننده (از اکسل/پیامک)» در برابر «حساب بانکی شما»
                 if (transaction.payerIdentifier.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Surface(color = Color(0xFFE3F2FD), shape = RoundedCornerShape(6.dp), modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "شماره کارت / حساب طرف مقابل (واریزکننده): ${transaction.payerIdentifier}",
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF0D47A1)
-                        )
+                    Surface(color = Color(0xFFE0F2F1), shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Rounded.CreditCard, contentDescription = null, tint = Color(0xFF00695C), modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "کارت / حساب فرد واریزکننده: ${transaction.payerIdentifier}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFF004D40)
+                                )
+                            }
+                            Text(
+                                text = "مبلغ: ${formatCurrency(transaction.amount)} ریال (${formatCurrency(transaction.amount / 10)} تومان) • تاریخ: ${transaction.persianDate}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF00695C)
+                            )
+                        }
                     }
+                    Spacer(modifier = Modifier.height(6.dp))
+                } else {
+                    Text(
+                        text = "${formatCurrency(transaction.amount)} ریال (${formatCurrency(transaction.amount / 10)} تومان)",
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text("تاریخ: ${transaction.persianDate}", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                    Spacer(modifier = Modifier.height(6.dp))
                 }
-                Spacer(modifier = Modifier.height(6.dp))
 
+                // متن اصلی پیامک (با لمس باز شدن در اپ پیامک گوشی)
                 Surface(
                     color = Color(0xFFF1F3F4),
                     shape = RoundedCornerShape(10.dp),
@@ -2425,43 +2493,43 @@ fun TransactionDetailDialog(
                     }
                 }
 
-                // کارت اتصال سریع شماره حساب پیامک به یکی از بانک‌های ایران (مخصوص پیامک‌های بدون نام بانک)
+                // باکس حساب بانکی شما و تعیین بانک (فقط برای انتصاب حساب خودتان به بانک)
                 if (transaction.rawAccountNumber.isNotBlank() || transaction.bankName == "سایر بانک‌ها") {
                     var showInlineBankPicker by remember { mutableStateOf(false) }
                     Spacer(modifier = Modifier.height(8.dp))
                     Surface(
-                        color = if (transaction.bankName == "سایر بانک‌ها") Color(0xFFE3F2FD) else Color(0xFFF5F7FA),
+                        color = if (transaction.bankName == "سایر بانک‌ها") Color(0xFFE3F2FD) else Color(0xFFF8FAFC),
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column(modifier = Modifier.padding(8.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            modifier = Modifier.padding(8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "حساب شما: ${transaction.accountKey}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF0D47A1)
+                                )
+                                if (transaction.rawAccountNumber.isNotBlank()) {
                                     Text(
-                                        text = if (transaction.rawAccountNumber.isNotBlank()) "شماره حساب: ${transaction.rawAccountNumber}" else "بانک شناسایی‌نشده",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF0D47A1)
-                                    )
-                                    Text(
-                                        text = "بانک فعلی: ${transaction.bankName}",
+                                        text = "شناسه حساب پیامک: ${transaction.rawAccountNumber}",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = Color.DarkGray
                                     )
                                 }
-                                Button(
-                                    onClick = { showInlineBankPicker = true },
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1565C0))
-                                ) {
-                                    Icon(Icons.Rounded.AccountBalance, contentDescription = null, modifier = Modifier.size(14.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("تعیین بانک", style = MaterialTheme.typography.labelSmall)
-                                }
+                            }
+                            Button(
+                                onClick = { showInlineBankPicker = true },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1565C0))
+                            ) {
+                                Icon(Icons.Rounded.AccountBalance, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("تعیین بانک", style = MaterialTheme.typography.labelSmall)
                             }
                         }
                     }
@@ -2484,58 +2552,150 @@ fun TransactionDetailDialog(
                     }
                 }
 
-                if (transaction.scope == "مدیریت ساختمان" && transaction.type == TransactionType.DEPOSIT && buildingUnits.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("انتخاب واحد پرداخت‌کننده (ایجاد بستانکاری شارژ):", style = MaterialTheme.typography.titleSmall, color = Color(0xFF00695C))
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(vertical = 4.dp)) {
-                        items(buildingUnits) { unit ->
-                            val isSel = selectedUnitId == unit.id
-                            FilterChip(
-                                selected = isSel,
-                                onClick = {
-                                    selectedUnitId = if (isSel) null else unit.id
-                                    if (!isSel) {
-                                        noteText = "${unit.unitNumber} - ${unit.residentName}"
-                                        selectedCategory = "شارژ ماهیانه واحدها"
-                                    }
-                                },
-                                label = { Text("${unit.unitNumber} (${unit.residentName})", style = MaterialTheme.typography.labelSmall) }
-                            )
-                        }
-                    }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp)
+                        .clickable { isInternalTransfer = !isInternalTransfer },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(checked = isInternalTransfer, onCheckedChange = { isInternalTransfer = it })
+                    Text("این تراکنش «انتقال بین حساب‌های خودم» است", style = MaterialTheme.typography.bodySmall)
+                }
 
-                    if (selectedUnitId != null) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp)
-                                .clickable { applyToBuildingAccounting = !applyToBuildingAccounting },
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Checkbox(checked = applyToBuildingAccounting, onCheckedChange = { applyToBuildingAccounting = it })
+                // =========================================================================
+                // بخش هوشمند ساختمان: فعال هم برای واریزها و هم برای انتقال بین حساب‌ها (چندواحدی + تقسیم کسر از بدهی!)
+                // =========================================================================
+                val isBuildingCreditOrTransfer = transaction.scope == "مدیریت ساختمان" &&
+                        (transaction.type == TransactionType.DEPOSIT || transaction.type == TransactionType.INTERNAL || isInternalTransfer) &&
+                        buildingUnits.isNotEmpty()
+
+                if (isBuildingCreditOrTransfer) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        color = Color(0xFFF0F9FF),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(
-                                text = if (applyToBuildingAccounting) "اعمال در حساب و بیلان ساختمان (بستانکاری واحد)" else "فقط جهت اتصال / یادداشت (عدم تاثیر در بیلان ساختمان)",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = if (applyToBuildingAccounting) Color(0xFF00695C) else Color.DarkGray
+                                text = if (isInternalTransfer || transaction.type == TransactionType.INTERNAL)
+                                    "انتقال وجه / تقسیم کسر از بدهی واحدهای انتخابی:"
+                                else
+                                    "نسبت دادن به واحد(های) ساختمان (بستانکاری / کسر از بدهی):",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = Color(0xFF00695C),
+                                fontWeight = FontWeight.Bold
                             )
-                        }
-                    }
 
-                    if (transaction.payerIdentifier.isNotEmpty() && selectedUnitId != null) {
-                        Surface(color = Color(0xFFE0F2F1), shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            Row(
-                                modifier = Modifier
-                                    .padding(6.dp)
-                                    .clickable { assignUnitToAllPayerDeposits = !assignUnitToAllPayerDeposits },
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Checkbox(checked = assignUnitToAllPayerDeposits, onCheckedChange = { assignUnitToAllPayerDeposits = it })
-                                Text(
-                                    text = "اتصال دائمی کارت «${transaction.payerIdentifier}» به این واحد",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFF004D40)
-                                )
+                            // امکان انتخاب یک یا چند واحد به‌صورت هم‌زمان
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(buildingUnits) { unit ->
+                                    val isSel = selectedUnitIds.contains(unit.id)
+                                    FilterChip(
+                                        selected = isSel,
+                                        onClick = {
+                                            selectedUnitIds = if (isSel) selectedUnitIds - unit.id else selectedUnitIds + unit.id
+                                            val chosenList = buildingUnits.filter { selectedUnitIds.contains(it.id) }
+                                            if (chosenList.size == 1) {
+                                                val u = chosenList.first()
+                                                noteText = "${u.unitNumber} - ${u.residentName}"
+                                                selectedCategory = "شارژ ماهیانه واحدها"
+                                            } else if (chosenList.size > 1) {
+                                                noteText = "تقسیم بین ${chosenList.joinToString("، ") { it.unitNumber }}"
+                                                selectedCategory = "شارژ ماهیانه واحدها"
+                                            }
+                                        },
+                                        label = { Text("${unit.unitNumber} (${unit.residentName})", style = MaterialTheme.typography.labelSmall) }
+                                    )
+                                }
+                            }
+
+                            if (selectedUnitIds.isNotEmpty()) {
+                                // انتخاب اعمال در بیلان ساختمان یا فقط اتصال یادداشت
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { applyToBuildingAccounting = !applyToBuildingAccounting },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(checked = applyToBuildingAccounting, onCheckedChange = { applyToBuildingAccounting = it })
+                                    Text(
+                                        text = if (applyToBuildingAccounting) "اعمال در حساب و بیلان ساختمان (کسر از بدهی / بستانکاری)" else "فقط جهت اتصال / یادداشت (بدون تغییر بیلان مالی)",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (applyToBuildingAccounting) Color(0xFF00695C) else Color.DarkGray
+                                    )
+                                }
+
+                                // اگر بیش از یک واحد انتخاب شد (یا حالت انتقال وجه بود)، نحوه تقسیم مبلغ را نشان بده
+                                if (selectedUnitIds.size > 1 && applyToBuildingAccounting) {
+                                    Text("نحوه تقسیم مبلغ بین ${selectedUnitIds.size} واحد انتخابی:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        listOf("تقسیم مساوی", "متراژ", "نفرات", "کل مبلغ هر واحد").forEachIndexed { idx, lbl ->
+                                            FilterChip(
+                                                selected = multiUnitSplitMode == idx,
+                                                onClick = { multiUnitSplitMode = idx },
+                                                label = { Text(lbl, style = MaterialTheme.typography.labelSmall) }
+                                            )
+                                        }
+                                    }
+                                    val perUnitPreview = if (multiUnitSplitMode == 3) transaction.amount else (transaction.amount / selectedUnitIds.size)
+                                    Text(
+                                        text = "سهم تقریبی هر واحد: ${formatCurrency(perUnitPreview)} ریال (${formatCurrency(perUnitPreview / 10)} تومان)",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFF0D47A1),
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                // اتصال دائمی کارت فعلی + کارت‌های هم‌نام در اکسل + ثبت شماره کارت‌های دیگر همین واحد
+                                if (selectedUnitIds.size == 1) {
+                                    val singleUnit = buildingUnits.first { it.id == selectedUnitIds.first() }
+                                    if (transaction.payerIdentifier.isNotEmpty()) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable { assignUnitToAllPayerDeposits = !assignUnitToAllPayerDeposits },
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Checkbox(checked = assignUnitToAllPayerDeposits, onCheckedChange = { assignUnitToAllPayerDeposits = it })
+                                            Text(
+                                                text = "اتصال دائمی کارت «${transaction.payerIdentifier}» به ${singleUnit.unitNumber}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = Color(0xFF004D40)
+                                            )
+                                        }
+                                    }
+
+                                    // پیشنهاد کارت‌های دیگرِ همین فرد در فایل اکسل
+                                    if (suggestedRelatedCards.isNotEmpty()) {
+                                        Text("سایر کارت‌های این فرد در اکسل (تیک بزنید تا متصل شوند):", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF1565C0))
+                                        suggestedRelatedCards.forEach { relCard ->
+                                            val checked = selectedRelatedCards.contains(relCard)
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier.clickable {
+                                                    selectedRelatedCards = if (checked) selectedRelatedCards - relCard else selectedRelatedCards + relCard
+                                                }
+                                            ) {
+                                                Checkbox(checked = checked, onCheckedChange = {
+                                                    selectedRelatedCards = if (checked) selectedRelatedCards - relCard else selectedRelatedCards + relCard
+                                                })
+                                                Text(relCard, style = MaterialTheme.typography.labelSmall)
+                                            }
+                                        }
+                                    }
+
+                                    // افزودن شماره کارت یا شماره حساب‌های دیگر برای همین واحد
+                                    OutlinedTextField(
+                                        value = extraCardsForUnitText,
+                                        onValueChange = { extraCardsForUnitText = it },
+                                        label = { Text("افزودن شماره کارت/حساب‌های دیگر این واحد (با کاما جدا کنید)", style = MaterialTheme.typography.labelSmall) },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
                             }
                         }
                     }
@@ -2568,17 +2728,6 @@ fun TransactionDetailDialog(
                             }
                         }
                     }
-                }
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp)
-                        .clickable { isInternalTransfer = !isInternalTransfer },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Checkbox(checked = isInternalTransfer, onCheckedChange = { isInternalTransfer = it })
-                    Text("این تراکنش «انتقال بین حساب‌های خودم» است", style = MaterialTheme.typography.bodySmall)
                 }
 
                 if (!isInternalTransfer) {
@@ -2724,6 +2873,8 @@ fun TransactionDetailDialog(
                 } else {
                     noteText.trim()
                 }
+
+                // ۱. اگر برداشت ساختمان بود و گزینه تقسیم بین واحدها انتخاب شد
                 if (splitExpenseAmongUnits && buildingUnits.isNotEmpty() && transaction.type == TransactionType.WITHDRAWAL) {
                     val now = System.currentTimeMillis()
                     val pDate = PersianDate(now)
@@ -2752,7 +2903,61 @@ fun TransactionDetailDialog(
                     }.filter { it.amount > 0L }
                     if (charges.isNotEmpty()) onSplitBuildingExpense(charges)
                 }
-                onSave(selectedCategory, finalNote, transferOverride, selectedUnitId, applyToBuildingAccounting, assignUnitToAllPayerDeposits, receiptPath)
+
+                // ۲. اگر بیش از یک واحد برای واریز/انتقال انتخاب شده بود، سهم هر واحد را محاسبه و به بستانکاری/کسر بدهی آن‌ها اضافه کن
+                if (selectedUnitIds.size > 1 && applyToBuildingAccounting) {
+                    val targetUnits = buildingUnits.filter { selectedUnitIds.contains(it.id) }
+                    val now = System.currentTimeMillis()
+                    val pDate = PersianDate(now)
+                    val dateTimeStr = PersianDateFormat("Y/m/d - H:i").format(pDate)
+                    val monthStr = PersianDateFormat("Y/m").format(pDate)
+                    val creditEntries = when (multiUnitSplitMode) {
+                        0 -> {
+                            val perUnit = transaction.amount / targetUnits.size
+                            targetUnits.map { u -> ManualBuildingEntryEntity(entryType = "UNIT_CREDIT", title = finalNote.ifEmpty { "تقسیم انتقال/واریز بانکی" }, amount = perUnit, unitId = u.id, persianDate = dateTimeStr, persianMonthYear = monthStr, timestampMillis = now) }
+                        }
+                        1 -> {
+                            val totalArea = targetUnits.sumOf { it.areaSqm.coerceAtLeast(1) }.toDouble()
+                            targetUnits.map { u ->
+                                val share = ((u.areaSqm.coerceAtLeast(1) / totalArea) * transaction.amount).toLong()
+                                ManualBuildingEntryEntity(entryType = "UNIT_CREDIT", title = finalNote.ifEmpty { "تقسیم متراژی واریز" }, amount = share, unitId = u.id, persianDate = dateTimeStr, persianMonthYear = monthStr, timestampMillis = now)
+                            }
+                        }
+                        2 -> {
+                            val totalPeople = targetUnits.sumOf { it.residentCount.coerceAtLeast(1) }.toDouble()
+                            targetUnits.map { u ->
+                                val share = ((u.residentCount.coerceAtLeast(1) / totalPeople) * transaction.amount).toLong()
+                                ManualBuildingEntryEntity(entryType = "UNIT_CREDIT", title = finalNote.ifEmpty { "تقسیم نفراتی واریز" }, amount = share, unitId = u.id, persianDate = dateTimeStr, persianMonthYear = monthStr, timestampMillis = now)
+                            }
+                        }
+                        else -> {
+                            targetUnits.map { u -> ManualBuildingEntryEntity(entryType = "UNIT_CREDIT", title = finalNote.ifEmpty { "بستانکاری انتقال بانکی" }, amount = transaction.amount, unitId = u.id, persianDate = dateTimeStr, persianMonthYear = monthStr, timestampMillis = now) }
+                        }
+                    }.filter { it.amount > 0L }
+
+                    onMultiUnitCreditSplit(creditEntries, emptyList())
+                    onSave(selectedCategory, finalNote, transferOverride, null, false, false, receiptPath)
+                    return@Button
+                }
+
+                // ۳. اگر یک واحد انتخاب شده بود، علاوه بر ثبت اصلی، کارت‌های اضافی/هم‌نام را هم به همان واحد متصل کن
+                val singleSelectedUnitId = selectedUnitIds.firstOrNull()
+                if (singleSelectedUnitId != null) {
+                    val unitObj = buildingUnits.first { it.id == singleSelectedUnitId }
+                    val unitTitle = "${unitObj.unitNumber} - ${unitObj.residentName}"
+                    val extraCardsList = extraCardsForUnitText
+                        .split(",", "،", " ")
+                        .map { it.trim() }
+                        .filter { it.length >= 4 }
+                    val allExtraMappings = (selectedRelatedCards + extraCardsList).map { card ->
+                        PayerUnitMappingEntity(card, singleSelectedUnitId, unitTitle)
+                    }
+                    if (allExtraMappings.isNotEmpty()) {
+                        onMultiUnitCreditSplit(emptyList(), allExtraMappings)
+                    }
+                }
+
+                onSave(selectedCategory, finalNote, transferOverride, singleSelectedUnitId, applyToBuildingAccounting, assignUnitToAllPayerDeposits, receiptPath)
             }) { Text("ثبت آنی") }
         },
         dismissButton = {

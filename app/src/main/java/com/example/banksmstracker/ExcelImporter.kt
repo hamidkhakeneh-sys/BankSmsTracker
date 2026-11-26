@@ -261,7 +261,7 @@ object ExcelImporter {
                 val sameAmount = existing.amount == amount
                 val sameDate = existing.persianDateOnly == normalizedDate
                 val sameBalance = balAmt > 0 && existing.balance != null && abs(existing.balance - balAmt) <= 10L
-                (sameDate && sameAmount && sameType) || (sameDate && sameBalance && sameAmount)
+                (sameDate && sameBalance && sameAmount) || (sameDate && sameAmount && sameType)
             }
 
             if (!alreadyExists) {

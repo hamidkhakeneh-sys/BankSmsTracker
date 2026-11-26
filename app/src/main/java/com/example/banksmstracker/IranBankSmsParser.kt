@@ -290,6 +290,59 @@ object IranBankSmsParser {
         }
     }
 
+
+    fun recomputeBankAccountRoles(
+        txList: List<BankTransaction>,
+        existingProfiles: Map<String, AccountProfileEntity>
+    ): Pair<List<BankTransaction>, List<AccountProfileEntity>> {
+        val updated = txList.toMutableList()
+        val accountsGroupedByBank = updated.groupBy { it.bankName }
+        val renamedAccountKeyMap = mutableMapOf<String, String>()
+
+        for ((bName, txListOfBank) in accountsGroupedByBank) {
+            val distinctAccsSortedByActivity = txListOfBank
+                .groupBy { it.accountNumber }
+                .toList()
+                .sortedByDescending { it.second.size }
+
+            if (distinctAccsSortedByActivity.size == 1) {
+                val (accNum, _) = distinctAccsSortedByActivity[0]
+                val newKey = if (accNum == "اصلی") "$bName - اصلی" else "$bName - اصلی ($accNum)"
+                txListOfBank.forEach { renamedAccountKeyMap[it.accountKey] = newKey }
+            } else {
+                distinctAccsSortedByActivity.forEachIndexed { idx, (accNum, groupTxs) ->
+                    val roleLabel = if (idx == 0) "اصلی" else "فرعی $idx"
+                    val newKey = if (accNum == "اصلی") "$bName - $roleLabel" else "$bName - $roleLabel ($accNum)"
+                    groupTxs.forEach { renamedAccountKeyMap[it.accountKey] = newKey }
+                }
+            }
+        }
+
+        val newProfiles = mutableMapOf<String, AccountProfileEntity>()
+        for (i in updated.indices) {
+            val tx = updated[i]
+            val finalKey = renamedAccountKeyMap[tx.accountKey] ?: tx.accountKey
+            val existingProf = existingProfiles[finalKey]
+                ?: existingProfiles.values.find { it.bankName == tx.bankName && it.accountNumber == tx.accountNumber }
+                ?: existingProfiles[tx.accountKey]
+                ?: AccountProfileEntity(
+                    accountKey = finalKey,
+                    bankName = tx.bankName,
+                    accountNumber = tx.accountNumber,
+                    customTitle = finalKey,
+                    scope = tx.scope
+                )
+            val syncedProfile = existingProf.copy(
+                accountKey = finalKey,
+                bankName = tx.bankName,
+                customTitle = finalKey
+            )
+            newProfiles[finalKey] = syncedProfile
+            updated[i] = tx.copy(accountKey = finalKey, scope = syncedProfile.scope)
+        }
+        return Pair(updated, newProfiles.values.toList())
+    }
+
     fun detectInternalTransfers(
         transactions: List<BankTransaction>,
         savedNotes: Map<String, TransactionNoteEntity>
@@ -555,12 +608,33 @@ fun readAllTransactionsFast(
         val impBankName = imp.accountKey.substringBefore(" - ").trim()
         val impDateOnly = imp.persianDate.substringBefore(" - ").trim()
 
-        val matchingSmsIndex = rawTransactions.indexOfFirst { smsTx ->
-            val sameBank = smsTx.accountKey == imp.accountKey || smsTx.bankName == impBankName
-            val sameType = (smsTx.type == TransactionType.DEPOSIT) == imp.isDeposit
-            val sameAmount = smsTx.amount == imp.amount
-            val sameDate = smsTx.persianDateOnly == impDateOnly
-            sameBank && sameType && sameAmount && sameDate
+        // اولویت ۱: تطبیق دقیق بر اساس تاریخ + مبلغ + مانده حساب (جلوگیری از تداخل دو واریز هم‌مبلغ)
+        val exactBalanceMatchIndex = if (imp.balance != null && imp.balance > 0L) {
+            rawTransactions.indexOfFirst { smsTx ->
+                val sameBank = smsTx.accountKey == imp.accountKey ||
+                        smsTx.bankName == impBankName ||
+                        smsTx.bankName.contains(impBankName.removePrefix("بانک ")) ||
+                        impBankName.contains(smsTx.bankName.removePrefix("بانک "))
+                val sameAmount = smsTx.amount == imp.amount
+                val sameDate = smsTx.persianDateOnly == impDateOnly
+                val sameBal = smsTx.balance != null && abs(smsTx.balance - imp.balance) <= 10L
+                sameBank && sameAmount && sameDate && sameBal
+            }
+        } else -1
+
+        val matchingSmsIndex = if (exactBalanceMatchIndex != -1) {
+            exactBalanceMatchIndex
+        } else {
+            rawTransactions.indexOfFirst { smsTx ->
+                val sameBank = smsTx.accountKey == imp.accountKey ||
+                        smsTx.bankName == impBankName ||
+                        smsTx.bankName.contains(impBankName.removePrefix("بانک ")) ||
+                        impBankName.contains(smsTx.bankName.removePrefix("بانک "))
+                val sameType = (smsTx.type == TransactionType.DEPOSIT) == imp.isDeposit || smsTx.type == TransactionType.INTERNAL
+                val sameAmount = smsTx.amount == imp.amount
+                val sameDate = smsTx.persianDateOnly == impDateOnly
+                sameBank && sameType && sameAmount && sameDate
+            }
         }
 
         if (matchingSmsIndex != -1) {

@@ -7,8 +7,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.provider.Telephony
 import android.speech.RecognizerIntent
 import android.widget.Toast
@@ -16,6 +20,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -31,7 +36,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.TextStyle
@@ -41,10 +50,30 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import saman.zamani.persiandate.PersianDate
+import saman.zamani.persiandate.PersianDateFormat
+
+val AppColorScheme = lightColorScheme(
+    primary = Color(0xFF0F2942),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFD6E4F0),
+    onPrimaryContainer = Color(0xFF0F2942),
+    secondary = Color(0xFF00796B),
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFE0F2F1),
+    onSecondaryContainer = Color(0xFF004D40),
+    tertiary = Color(0xFFE65100),
+    background = Color(0xFFF2F5F8),
+    surface = Color.White,
+    onSurface = Color(0xFF1C2434)
+)
 
 class MainActivity : ComponentActivity() {
     private var notificationSmsId by mutableStateOf<String?>(null)
@@ -70,11 +99,11 @@ class MainActivity : ComponentActivity() {
                 )
             }
 
-            MaterialTheme(typography = dynamicTypography) {
+            MaterialTheme(colorScheme = AppColorScheme, typography = dynamicTypography) {
                 CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
                     Surface(
                         modifier = Modifier.fillMaxSize(),
-                        color = Color(0xFFF3F5F9)
+                        color = MaterialTheme.colorScheme.background
                     ) {
                         HolooSmsAccountingApp(
                             openDialogForSmsId = notificationSmsId,
@@ -152,12 +181,17 @@ fun HolooSmsAccountingApp(
     var categories by remember { mutableStateOf<List<CategoryEntity>>(emptyList()) }
     var ignoredItems by remember { mutableStateOf<List<IgnoredItemEntity>>(emptyList()) }
     var payerMappings by remember { mutableStateOf<List<PayerUnitMappingEntity>>(emptyList()) }
+    var buildingUnits by remember { mutableStateOf<List<BuildingUnitEntity>>(emptyList()) }
+    var unitCharges by remember { mutableStateOf<List<UnitChargeEntity>>(emptyList()) }
     var customScopes by remember { mutableStateOf<List<String>>(listOf("شخصی", "مدیریت ساختمان")) }
 
     var isLoading by remember { mutableStateOf(false) }
 
     var bottomTabIndex by remember { mutableIntStateOf(0) }
     var selectedScope by remember { mutableStateOf("همه صندوق‌ها") }
+    var chartViewMode by remember { mutableStateOf(ChartViewMode.YEARLY_DRILLDOWN) }
+    var dashboardSelectedYear by remember(selectedScope) { mutableStateOf<String?>(null) }
+    var dashboardSelectedMonth by remember(selectedScope) { mutableStateOf<String?>(null) }
 
     var selectedTransaction by remember { mutableStateOf<BankTransaction?>(null) }
     var showCategoryManager by remember { mutableStateOf(false) }
@@ -178,6 +212,21 @@ fun HolooSmsAccountingApp(
         }
     }
 
+    // تراکنش‌های فیلترشده صفحه اول بر اساس سال یا ماه انتخاب‌شده در نمودار
+    val dashboardDisplayTransactions by remember(scopedTransactions, dashboardSelectedYear, dashboardSelectedMonth) {
+        derivedStateOf {
+            when {
+                dashboardSelectedMonth != null -> scopedTransactions.filter { it.persianMonthYear == dashboardSelectedMonth }
+                dashboardSelectedYear != null -> scopedTransactions.filter { it.persianYear == dashboardSelectedYear }
+                else -> scopedTransactions
+            }
+        }
+    }
+
+    val buildingTransactions by remember(allTransactions) {
+        derivedStateOf { allTransactions.filter { it.scope == "مدیریت ساختمان" } }
+    }
+
     val scopedDiscrepancies by remember(discrepancies, accountProfiles, selectedScope) {
         derivedStateOf {
             if (selectedScope == "همه صندوق‌ها") discrepancies
@@ -194,9 +243,14 @@ fun HolooSmsAccountingApp(
         }
     }
 
-    val availableCategoryFilters by remember(categories) {
+    val availableCategoryFilters by remember(categories, selectedScope) {
         derivedStateOf {
-            listOf("همه دسته‌ها", "دسته‌بندی نشده") + categories.map { it.name }
+            val relevantCats = when (selectedScope) {
+                "شخصی" -> categories.filter { it.scope == "شخصی" }
+                "مدیریت ساختمان" -> categories.filter { it.scope == "مدیریت ساختمان" }
+                else -> categories
+            }.map { it.name }
+            listOf("همه دسته‌ها", "دسته‌بندی نشده") + relevantCats
         }
     }
 
@@ -251,6 +305,16 @@ fun HolooSmsAccountingApp(
                     customScopes = savedScopesStr.split("|").filter { it.isNotBlank() }
                 }
 
+                val savedChartMode = settingsMap["chart_view_mode"]
+                if (savedChartMode == ChartViewMode.MONTHLY_ALL.name) {
+                    chartViewMode = ChartViewMode.MONTHLY_ALL
+                } else {
+                    chartViewMode = ChartViewMode.YEARLY_DRILLDOWN
+                }
+
+                buildingUnits = appDao.getAllBuildingUnits()
+                unitCharges = appDao.getAllUnitCharges()
+
                 val ignoredList = appDao.getAllIgnored()
                 ignoredItems = ignoredList
                 val ignoredIds = ignoredList.filter { !it.isSenderBlocked }.map { it.keyId }.toSet()
@@ -258,7 +322,7 @@ fun HolooSmsAccountingApp(
 
                 val mappingsList = appDao.getAllPayerMappings()
                 payerMappings = mappingsList
-                val mappingsMap = mappingsList.associate { it.payerIdentifier to it.unitTitle }
+                val mappingsMap = mappingsList.associateBy { it.payerIdentifier }
 
                 val savedNotesMap = appDao.getAllNotes().associateBy { it.smsId }
                 val existingProfilesMap = appDao.getAllAccountProfiles().associate {
@@ -321,11 +385,13 @@ fun HolooSmsAccountingApp(
         }
     }
 
-    SmsBroadcastObserver(
+    // ناظر بهینه پیامک فقط زمانی که اپلیکیشن در پیش‌زمینه (ON_START..ON_STOP) است فعال می‌ماند
+    // و به محض رفتن برنامه به پس‌زمینه (ON_STOP) آزاد می‌شود تا مصرف باتری صفر باشد
+    LifecycleAwareSmsObserver(
         hasPermission = hasSmsPermission,
         onNewBankTransaction = {
             coroutineScope.launch {
-                delay(1500L)
+                delay(1200L)
                 fullReloadFromSms()
             }
         }
@@ -333,27 +399,34 @@ fun HolooSmsAccountingApp(
 
     Scaffold(
         topBar = {
-            Column(modifier = Modifier.background(Color(0xFF0F2942))) {
+            Column(
+                modifier = Modifier.background(
+                    Brush.horizontalGradient(listOf(Color(0xFF0B1F3A), Color(0xFF133B5C)))
+                )
+            ) {
                 TopAppBar(
                     title = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Rounded.AccountBalanceWallet,
-                                contentDescription = null,
-                                tint = Color(0xFF64B5F6),
-                                modifier = Modifier.size(26.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
+                            Surface(
+                                color = Color(0xFF00897B),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Rounded.AccountBalanceWallet, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
                             Column {
-                                Text("حسابداری هوشمند", style = MaterialTheme.typography.titleMedium, color = Color.White)
-                                Text("مدیریت شخصی و ساختمان", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB0BEC5))
+                                Text("حسابداری هوشمند و شارژمان", style = MaterialTheme.typography.titleMedium, color = Color.White)
+                                Text("مدیریت مالی شخصی و آپارتمان", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB2DFDB))
                             }
                         }
                     },
                     actions = {
                         if (hasSmsPermission) {
                             IconButton(onClick = { showCategoryManager = true }) {
-                                Icon(Icons.Rounded.Category, contentDescription = "سرفصل‌ها", tint = Color.White)
+                                Icon(Icons.Rounded.AccountTree, contentDescription = "سرفصل‌ها", tint = Color.White)
                             }
                             IconButton(
                                 onClick = { CsvExporter.exportAndShareCsv(context, journalTransactions, selectedScope) },
@@ -366,10 +439,10 @@ fun HolooSmsAccountingApp(
                             }
                         }
                     },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF0F2942))
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
                 )
 
-                if (hasSmsPermission) {
+                if (hasSmsPermission && bottomTabIndex != 2) {
                     val allScopes = listOf("همه صندوق‌ها") + customScopes
                     LazyRow(
                         modifier = Modifier
@@ -386,7 +459,7 @@ fun HolooSmsAccountingApp(
                                     selectedCategoryFilter = "همه دسته‌ها"
                                 },
                                 shape = RoundedCornerShape(20.dp),
-                                color = if (isSelected) Color(0xFF42A5F5) else Color(0xFF1C3B59)
+                                color = if (isSelected) Color(0xFF00897B) else Color.White.copy(alpha = 0.14f)
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
@@ -396,11 +469,11 @@ fun HolooSmsAccountingApp(
                                         imageVector = when (scopeName) {
                                             "مدیریت ساختمان" -> Icons.Rounded.Apartment
                                             "شخصی" -> Icons.Rounded.Person
-                                            else -> Icons.Rounded.FolderShared
+                                            else -> Icons.Rounded.AccountBalance
                                         },
                                         contentDescription = null,
                                         tint = Color.White,
-                                        modifier = Modifier.size(15.dp)
+                                        modifier = Modifier.size(16.dp)
                                     )
                                     Spacer(modifier = Modifier.width(5.dp))
                                     Text(
@@ -418,11 +491,16 @@ fun HolooSmsAccountingApp(
         },
         bottomBar = {
             if (hasSmsPermission) {
-                NavigationBar(containerColor = Color.White, tonalElevation = 8.dp) {
+                NavigationBar(containerColor = Color.White, tonalElevation = 10.dp) {
                     NavigationBarItem(
                         selected = bottomTabIndex == 0,
                         onClick = { bottomTabIndex = 0 },
-                        icon = { Icon(Icons.Rounded.PieChart, contentDescription = null) },
+                        icon = {
+                            Icon(
+                                if (bottomTabIndex == 0) Icons.Rounded.DonutLarge else Icons.Rounded.PieChartOutline,
+                                contentDescription = null
+                            )
+                        },
                         label = { Text("داشبورد", style = MaterialTheme.typography.labelSmall) }
                     )
                     NavigationBarItem(
@@ -434,12 +512,18 @@ fun HolooSmsAccountingApp(
                     NavigationBarItem(
                         selected = bottomTabIndex == 2,
                         onClick = { bottomTabIndex = 2 },
-                        icon = { Icon(Icons.Rounded.Analytics, contentDescription = null) },
-                        label = { Text("گزارشات", style = MaterialTheme.typography.labelSmall) }
+                        icon = { Icon(Icons.Rounded.Domain, contentDescription = null) },
+                        label = { Text("شارژمان", style = MaterialTheme.typography.labelSmall) }
                     )
                     NavigationBarItem(
                         selected = bottomTabIndex == 3,
                         onClick = { bottomTabIndex = 3 },
+                        icon = { Icon(Icons.Rounded.QueryStats, contentDescription = null) },
+                        label = { Text("گزارشات", style = MaterialTheme.typography.labelSmall) }
+                    )
+                    NavigationBarItem(
+                        selected = bottomTabIndex == 4,
+                        onClick = { bottomTabIndex = 4 },
                         icon = {
                             BadgedBox(
                                 badge = {
@@ -473,7 +557,7 @@ fun HolooSmsAccountingApp(
                         modifier = Modifier.align(Alignment.Center),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        CircularProgressIndicator(color = Color(0xFF0F2942))
+                        CircularProgressIndicator(color = Color(0xFF00796B))
                         Spacer(modifier = Modifier.height(10.dp))
                         Text("در حال پردازش اسناد بانکی...", style = MaterialTheme.typography.bodyMedium)
                     }
@@ -481,10 +565,22 @@ fun HolooSmsAccountingApp(
                 else -> {
                     when (bottomTabIndex) {
                         0 -> DashboardScreen(
-                            transactions = scopedTransactions,
+                            allScopedTransactions = scopedTransactions,
+                            displayTransactions = dashboardDisplayTransactions,
+                            viewMode = chartViewMode,
+                            onViewModeChange = { newMode ->
+                                chartViewMode = newMode
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.saveSetting(AppSettingEntity("chart_view_mode", newMode.name))
+                                }
+                            },
+                            selectedYear = dashboardSelectedYear,
+                            onSelectYear = { dashboardSelectedYear = it },
+                            selectedMonth = dashboardSelectedMonth,
+                            onSelectMonth = { dashboardSelectedMonth = it },
                             discrepancyCount = scopedDiscrepancies.size,
                             scopeTitle = selectedScope,
-                            onNavigateToDiscrepancies = { bottomTabIndex = 3 }
+                            onNavigateToDiscrepancies = { bottomTabIndex = 4 }
                         )
                         1 -> JournalScreen(
                             transactions = journalTransactions,
@@ -500,14 +596,74 @@ fun HolooSmsAccountingApp(
                             onCategoryChange = { selectedCategoryFilter = it },
                             onTransactionClick = { selectedTransaction = it }
                         )
-                        2 -> AdvancedReportsScreen(
+                        2 -> SharjemanBuildingScreen(
+                            units = buildingUnits,
+                            unitCharges = unitCharges,
+                            buildingTransactions = buildingTransactions,
+                            onAddOrUpdateUnit = { unit ->
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.saveBuildingUnit(unit)
+                                    buildingUnits = appDao.getAllBuildingUnits()
+                                }
+                            },
+                            onDeleteUnit = { unitId ->
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.deleteBuildingUnit(unitId)
+                                    buildingUnits = appDao.getAllBuildingUnits()
+                                }
+                            },
+                            onChargeAllUnitsMonthly = { title, customAmount ->
+                                val now = System.currentTimeMillis()
+                                val pDate = PersianDate(now)
+                                val dateStr = PersianDateFormat("Y/m/d").format(pDate)
+                                val monthStr = PersianDateFormat("Y/m").format(pDate)
+                                val newCharges = buildingUnits.map { u ->
+                                    UnitChargeEntity(
+                                        unitId = u.id,
+                                        amount = customAmount ?: u.monthlyCharge,
+                                        title = title,
+                                        persianDate = dateStr,
+                                        persianMonthYear = monthStr,
+                                        timestampMillis = now
+                                    )
+                                }
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.insertUnitCharges(newCharges)
+                                    unitCharges = appDao.getAllUnitCharges()
+                                }
+                                Toast.makeText(context, "بدهی شارژ برای ${buildingUnits.size} واحد صادر شد", Toast.LENGTH_SHORT).show()
+                            },
+                            onChargeSingleUnit = { uId, title, amt ->
+                                val now = System.currentTimeMillis()
+                                val pDate = PersianDate(now)
+                                val ch = UnitChargeEntity(
+                                    unitId = uId,
+                                    amount = amt,
+                                    title = title,
+                                    persianDate = PersianDateFormat("Y/m/d").format(pDate),
+                                    persianMonthYear = PersianDateFormat("Y/m").format(pDate),
+                                    timestampMillis = now
+                                )
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.insertUnitCharges(listOf(ch))
+                                    unitCharges = appDao.getAllUnitCharges()
+                                }
+                            },
+                            onDeleteCharge = { chId ->
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.deleteUnitCharge(chId)
+                                    unitCharges = appDao.getAllUnitCharges()
+                                }
+                            }
+                        )
+                        3 -> AdvancedReportsScreen(
                             transactions = scopedTransactions,
                             scopeTitle = selectedScope,
                             onExportCsv = { listToExport ->
                                 CsvExporter.exportAndShareCsv(context, listToExport, selectedScope)
                             }
                         )
-                        3 -> SettingsAndReconciliationScreen(
+                        4 -> SettingsAndReconciliationScreen(
                             accountProfiles = accountProfiles,
                             transactions = allTransactions,
                             discrepancies = scopedDiscrepancies,
@@ -515,6 +671,15 @@ fun HolooSmsAccountingApp(
                             payerMappings = payerMappings,
                             ignoredItems = ignoredItems,
                             fontScale = fontScale,
+                            chartViewMode = chartViewMode,
+                            onChartViewModeChange = { newMode ->
+                                chartViewMode = newMode
+                                dashboardSelectedYear = null
+                                dashboardSelectedMonth = null
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.saveSetting(AppSettingEntity("chart_view_mode", newMode.name))
+                                }
+                            },
                             onFontScaleChange = { newScale ->
                                 onFontScaleChanged(newScale)
                                 coroutineScope.launch(Dispatchers.IO) {
@@ -569,10 +734,13 @@ fun HolooSmsAccountingApp(
             TransactionDetailDialog(
                 transaction = currentTx,
                 categories = categories,
+                buildingUnits = buildingUnits,
                 onDismiss = { selectedTransaction = null },
-                onSave = { newCategory, newNote, transferOverride, assignUnitToPayerCard ->
+                onSave = { newCategory, newNote, transferOverride, selectedUnitId, assignUnitToPayerCard, receiptPath ->
                     val targetPayer = currentTx.payerIdentifier
-                    val shouldAutoPropagate = assignUnitToPayerCard && targetPayer.isNotEmpty() && newNote.isNotBlank()
+                    val unitObj = buildingUnits.find { it.id == selectedUnitId }
+                    val autoUnitLabel = if (unitObj != null) "${unitObj.unitNumber} - ${unitObj.residentName}" else newNote
+                    val shouldAutoPropagate = assignUnitToPayerCard && targetPayer.isNotEmpty() && selectedUnitId != null
 
                     allTransactions = allTransactions.map { tx ->
                         when {
@@ -584,14 +752,17 @@ fun HolooSmsAccountingApp(
                                     else -> tx.type
                                 }
                                 tx.copy(
-                                    userNote = newNote,
+                                    userNote = autoUnitLabel,
                                     category = newCategory,
+                                    unitId = selectedUnitId,
+                                    receiptImagePath = receiptPath,
                                     type = updatedType
                                 )
                             }
                             shouldAutoPropagate && tx.payerIdentifier == targetPayer -> {
                                 tx.copy(
-                                    userNote = newNote,
+                                    userNote = autoUnitLabel,
+                                    unitId = selectedUnitId,
                                     category = newCategory.ifBlank { "شارژ ماهیانه واحدها" }
                                 )
                             }
@@ -599,9 +770,9 @@ fun HolooSmsAccountingApp(
                         }
                     }
 
-                    if (shouldAutoPropagate) {
+                    if (shouldAutoPropagate && selectedUnitId != null) {
                         val updatedMapList = payerMappings.filterNot { it.payerIdentifier == targetPayer } +
-                                PayerUnitMappingEntity(targetPayer, newNote)
+                                PayerUnitMappingEntity(targetPayer, selectedUnitId, autoUnitLabel)
                         payerMappings = updatedMapList
                     }
 
@@ -611,29 +782,29 @@ fun HolooSmsAccountingApp(
                         appDao.saveNote(
                             TransactionNoteEntity(
                                 smsId = currentTx.id,
-                                note = newNote,
+                                note = autoUnitLabel,
                                 category = newCategory,
-                                isInternalTransferOverride = transferOverride
+                                isInternalTransferOverride = transferOverride,
+                                unitId = selectedUnitId,
+                                receiptImagePath = receiptPath
                             )
                         )
-                        if (shouldAutoPropagate) {
-                            appDao.savePayerMapping(PayerUnitMappingEntity(targetPayer, newNote))
+                        if (shouldAutoPropagate && selectedUnitId != null) {
+                            appDao.savePayerMapping(PayerUnitMappingEntity(targetPayer, selectedUnitId, autoUnitLabel))
                             val matchingIds = allTransactions.filter { it.payerIdentifier == targetPayer && it.id != currentTx.id }
                             val batchNotes = matchingIds.map {
                                 TransactionNoteEntity(
                                     smsId = it.id,
-                                    note = newNote,
-                                    category = newCategory.ifBlank { "شارژ ماهیانه واحدها" }
+                                    note = autoUnitLabel,
+                                    category = newCategory.ifBlank { "شارژ ماهیانه واحدها" },
+                                    unitId = selectedUnitId,
+                                    receiptImagePath = it.receiptImagePath
                                 )
                             }
                             if (batchNotes.isNotEmpty()) {
                                 appDao.saveNotesBatch(batchNotes)
                             }
                         }
-                    }
-
-                    if (shouldAutoPropagate) {
-                        Toast.makeText(context, "واحد «$newNote» برای تمام واریزهای این کارت اعمال شد", Toast.LENGTH_SHORT).show()
                     }
                 },
                 onMarkAsNotBankSms = { blockEntireSender ->
@@ -656,7 +827,8 @@ fun HolooSmsAccountingApp(
                 },
                 onAddNewCategory = { newCatName ->
                     val isExp = currentTx.type != TransactionType.DEPOSIT
-                    val newCat = CategoryEntity(newCatName, isExp, "ALL")
+                    val targetScope = if (currentTx.scope == "مدیریت ساختمان") "مدیریت ساختمان" else "شخصی"
+                    val newCat = CategoryEntity(newCatName, isExp, targetScope)
                     categories = categories + newCat
                     coroutineScope.launch(Dispatchers.IO) {
                         appDao.addCategory(newCat)
@@ -669,8 +841,8 @@ fun HolooSmsAccountingApp(
             CategoryManagerDialog(
                 categories = categories,
                 onDismiss = { showCategoryManager = false },
-                onAddCategory = { name, isExpense ->
-                    val newCat = CategoryEntity(name, isExpense, "ALL")
+                onAddCategory = { name, isExpense, catScope ->
+                    val newCat = CategoryEntity(name, isExpense, catScope)
                     categories = categories + newCat
                     coroutineScope.launch(Dispatchers.IO) {
                         appDao.addCategory(newCat)
@@ -687,24 +859,53 @@ fun HolooSmsAccountingApp(
     }
 }
 
+// ============================================================================
+// تب ۱: داشبورد مدیریتی با نمودار سلسله‌مراتبی (سالانه -> ماهانه -> تفکیک سرفصل‌ها)
+// ============================================================================
 @Composable
 fun DashboardScreen(
-    transactions: List<BankTransaction>,
+    allScopedTransactions: List<BankTransaction>,
+    displayTransactions: List<BankTransaction>,
+    viewMode: ChartViewMode,
+    onViewModeChange: (ChartViewMode) -> Unit,
+    selectedYear: String?,
+    onSelectYear: (String?) -> Unit,
+    selectedMonth: String?,
+    onSelectMonth: (String?) -> Unit,
     discrepancyCount: Int,
     scopeTitle: String,
     onNavigateToDiscrepancies: () -> Unit
 ) {
-    val totalDeposit = remember(transactions) {
-        transactions.filter { it.type == TransactionType.DEPOSIT }.sumOf { it.amount }
+    val totalDeposit = remember(displayTransactions) {
+        displayTransactions.filter { it.type == TransactionType.DEPOSIT }.sumOf { it.amount }
     }
-    val totalWithdrawal = remember(transactions) {
-        transactions.filter { it.type == TransactionType.WITHDRAWAL }.sumOf { it.amount }
+    val totalWithdrawal = remember(displayTransactions) {
+        displayTransactions.filter { it.type == TransactionType.WITHDRAWAL }.sumOf { it.amount }
     }
-    val internalTransferSum = remember(transactions) {
-        transactions.filter { it.type == TransactionType.INTERNAL }.sumOf { it.amount } / 2
+    val internalTransferSum = remember(displayTransactions) {
+        displayTransactions.filter { it.type == TransactionType.INTERNAL }.sumOf { it.amount } / 2
     }
 
     var chartExpenseMode by remember { mutableStateOf(true) }
+
+    val activePeriodLabel = remember(selectedYear, selectedMonth) {
+        when {
+            selectedMonth != null -> formatPersianMonthShort(selectedMonth)
+            selectedYear != null -> "سال $selectedYear"
+            else -> null
+        }
+    }
+
+    // لیست تفکیک‌شده سرفصل‌های دوره انتخاب‌شده (نمایش جزئیات مبالغ زیر نمودار)
+    val categoryBreakdown = remember(displayTransactions, chartExpenseMode) {
+        val targetType = if (chartExpenseMode) TransactionType.WITHDRAWAL else TransactionType.DEPOSIT
+        displayTransactions
+            .filter { it.type == targetType }
+            .groupBy { it.category.ifBlank { "دسته‌بندی نشده" } }
+            .mapValues { entry -> Pair(entry.value.size, entry.value.sumOf { it.amount }) }
+            .toList()
+            .sortedByDescending { it.second.second }
+    }
 
     Column(
         modifier = Modifier
@@ -719,7 +920,7 @@ fun DashboardScreen(
                     .fillMaxWidth()
                     .clickable { onNavigateToDiscrepancies() },
                 colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E0)),
-                shape = RoundedCornerShape(12.dp)
+                shape = RoundedCornerShape(14.dp)
             ) {
                 Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Rounded.WarningAmber, contentDescription = null, tint = Color(0xFFE65100))
@@ -732,7 +933,7 @@ fun DashboardScreen(
                             style = MaterialTheme.typography.titleSmall
                         )
                         Text(
-                            text = "برای بررسی یا بارگذاری فایل صورت‌حساب بانک (اکسل/PDF) لمس کنید.",
+                            text = "برای بررسی یا بارگذاری صورت‌حساب بانک (اکسل/PDF) لمس کنید.",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFF5D4037)
                         )
@@ -742,17 +943,47 @@ fun DashboardScreen(
             }
         }
 
+        // کارت تراز مالی
         Card(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
+            shape = RoundedCornerShape(18.dp),
             colors = CardDefaults.cardColors(containerColor = Color.White),
-            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Rounded.AccountBalance, contentDescription = null, tint = Color(0xFF0F2942), modifier = Modifier.size(20.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("تراز مالی ($scopeTitle)", style = MaterialTheme.typography.titleMedium, color = Color(0xFF0F2942))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.AccountBalance, contentDescription = null, tint = Color(0xFF0F2942), modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (activePeriodLabel == null) "تراز مالی ($scopeTitle - کل)" else "تراز مالی ($scopeTitle - $activePeriodLabel)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF0F2942)
+                        )
+                    }
+                    if (activePeriodLabel != null) {
+                        Surface(
+                            modifier = Modifier.clickable {
+                                onSelectMonth(null)
+                                onSelectYear(null)
+                            },
+                            color = Color(0xFFFFEBEE),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                text = "حذف فیلتر ✕",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFC62828),
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 }
                 Spacer(modifier = Modifier.height(12.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -762,7 +993,7 @@ fun DashboardScreen(
                             text = "+${formatCurrency(totalDeposit)} ریال",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.ExtraBold,
-                            color = Color(0xFF2E7D32)
+                            color = Color(0xFF00897B)
                         )
                     }
                     Column(horizontalAlignment = Alignment.End) {
@@ -771,7 +1002,7 @@ fun DashboardScreen(
                             text = "-${formatCurrency(totalWithdrawal)} ریال",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.ExtraBold,
-                            color = Color(0xFFC62828)
+                            color = Color(0xFFE53935)
                         )
                     }
                 }
@@ -783,7 +1014,7 @@ fun DashboardScreen(
                         text = "${if (net >= 0) "+" else ""}${formatCurrency(net)} ریال",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
-                        color = if (net >= 0) Color(0xFF1565C0) else Color(0xFFC62828)
+                        color = if (net >= 0) Color(0xFF1565C0) else Color(0xFFE53935)
                     )
                 }
                 if (internalTransferSum > 0) {
@@ -797,25 +1028,86 @@ fun DashboardScreen(
             }
         }
 
+        // نمودار سلسله‌مراتبی سالانه -> ماهانه با کلیک روی ستون‌ها
+        HierarchicalTimeBarChart(
+            allScopedTransactions = allScopedTransactions,
+            viewMode = viewMode,
+            onViewModeChange = onViewModeChange,
+            selectedYear = selectedYear,
+            onSelectYear = onSelectYear,
+            selectedMonth = selectedMonth,
+            onSelectMonth = onSelectMonth
+        )
+
+        // سوییچر انتخاب نمودار هزینه‌ها یا درآمدها
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(
                 selected = chartExpenseMode,
                 onClick = { chartExpenseMode = true },
-                label = { Text("نمودار هزینه‌ها") },
+                label = { Text("هزینه‌های ${activePeriodLabel ?: "کل"}") },
                 leadingIcon = { Icon(Icons.Rounded.TrendingDown, contentDescription = null, modifier = Modifier.size(16.dp)) },
                 modifier = Modifier.weight(1f)
             )
             FilterChip(
                 selected = !chartExpenseMode,
                 onClick = { chartExpenseMode = false },
-                label = { Text("نمودار درآمدها") },
+                label = { Text("درآمدهای ${activePeriodLabel ?: "کل"}") },
                 leadingIcon = { Icon(Icons.Rounded.TrendingUp, contentDescription = null, modifier = Modifier.size(16.dp)) },
                 modifier = Modifier.weight(1f)
             )
         }
 
-        InteractiveCategoryDonutChart(transactions = transactions, isExpenseMode = chartExpenseMode)
-        MonthlyComparisonBarChart(transactions = transactions)
+        // نمودار دایره‌ای سهم هر سرفصل
+        InteractiveCategoryDonutChart(
+            transactions = displayTransactions,
+            isExpenseMode = chartExpenseMode,
+            periodBadgeLabel = activePeriodLabel
+        )
+
+        // جدول تفکیک مبالغ هر سرفصل برای سال یا ماه انتخاب‌شده
+        if (categoryBreakdown.isNotEmpty()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "ریز تفکیک سرفصل‌ها (${activePeriodLabel ?: "کل دوره"})",
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = Color(0xFF0F2942)
+                    )
+                    categoryBreakdown.forEachIndexed { idx, (catName, countAndSum) ->
+                        val (count, sum) = countAndSum
+                        val color = ChartPalette[idx % ChartPalette.size]
+                        HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFEEEEEE))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Surface(
+                                    color = color,
+                                    shape = RoundedCornerShape(4.dp),
+                                    modifier = Modifier.size(10.dp)
+                                ) {}
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("$catName ($count سند)", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                            }
+                            Text(
+                                text = "${formatCurrency(sum)} ریال",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold,
+                                color = if (chartExpenseMode) Color(0xFFE53935) else Color(0xFF00897B)
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -855,7 +1147,7 @@ fun JournalScreen(
                     }
                 },
                 singleLine = true,
-                shape = RoundedCornerShape(10.dp)
+                shape = RoundedCornerShape(12.dp)
             )
 
             Spacer(modifier = Modifier.height(6.dp))
@@ -980,7 +1272,7 @@ fun AdvancedReportsScreen(
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color.White),
-                shape = RoundedCornerShape(14.dp)
+                shape = RoundedCornerShape(16.dp)
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Text("بازه زمانی گزارش ($scopeTitle)", style = MaterialTheme.typography.titleSmall, color = Color(0xFF0F2942))
@@ -1047,8 +1339,8 @@ fun AdvancedReportsScreen(
                     HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
 
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("واریز دوره: +${formatCurrency(totalDep)}", color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
-                        Text("برداشت دوره: -${formatCurrency(totalWit)}", color = Color(0xFFC62828), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+                        Text("واریز دوره: +${formatCurrency(totalDep)}", color = Color(0xFF00897B), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+                        Text("برداشت دوره: -${formatCurrency(totalWit)}", color = Color(0xFFE53935), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }
@@ -1059,7 +1351,7 @@ fun AdvancedReportsScreen(
                 onClick = { onExportCsv(reportTransactions) },
                 enabled = reportTransactions.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(10.dp),
+                shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F2942))
             ) {
                 Icon(Icons.Rounded.FileDownload, contentDescription = null)
@@ -1069,25 +1361,25 @@ fun AdvancedReportsScreen(
         }
 
         item {
-            Text("هزینه‌های دوره به تفکیک سرفصل", style = MaterialTheme.typography.titleSmall, color = Color(0xFFC62828))
+            Text("هزینه‌های دوره به تفکیک سرفصل", style = MaterialTheme.typography.titleSmall, color = Color(0xFFE53935))
         }
         items(expenseByCategory) { (cat, sum) ->
             Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
                 Row(modifier = Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(cat, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                    Text("${formatCurrency(sum)} ریال", color = Color(0xFFC62828), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                    Text("${formatCurrency(sum)} ریال", color = Color(0xFFE53935), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
                 }
             }
         }
 
         item {
-            Text("درآمدها و واریزی‌های دوره به تفکیک سرفصل", style = MaterialTheme.typography.titleSmall, color = Color(0xFF2E7D32))
+            Text("درآمدها و واریزی‌های دوره به تفکیک سرفصل", style = MaterialTheme.typography.titleSmall, color = Color(0xFF00897B))
         }
         items(incomeByCategory) { (cat, sum) ->
             Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
                 Row(modifier = Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(cat, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                    Text("${formatCurrency(sum)} ریال", color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                    Text("${formatCurrency(sum)} ریال", color = Color(0xFF00897B), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
                 }
             }
         }
@@ -1104,6 +1396,8 @@ fun SettingsAndReconciliationScreen(
     ignoredItems: List<IgnoredItemEntity>,
     fontScale: Float,
     onFontScaleChange: (Float) -> Unit,
+    chartViewMode: ChartViewMode,
+    onChartViewModeChange: (ChartViewMode) -> Unit,
     onAddCustomScope: (String) -> Unit,
     onChangeAccountScope: (AccountProfileEntity, String) -> Unit,
     onImportStatementRecords: (List<ImportedRecordEntity>) -> Unit,
@@ -1114,6 +1408,12 @@ fun SettingsAndReconciliationScreen(
     var newScopeInput by remember { mutableStateOf("") }
     var selectedAccountForExcel by remember(accountProfiles) {
         mutableStateOf(accountProfiles.firstOrNull()?.accountKey ?: "")
+    }
+
+    // بررسی وضعیت بهینه‌سازی مصرف باتری گوشی
+    val powerManager = remember { context.getSystemService(Context.POWER_SERVICE) as PowerManager }
+    val isBatteryUnrestricted = remember {
+        powerManager.isIgnoringBatteryOptimizations(context.packageName)
     }
 
     val statementPickerLauncher = rememberLauncherForActivityResult(
@@ -1143,8 +1443,59 @@ fun SettingsAndReconciliationScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // کارت مدیریت هوشمند مصرف باتری
         item {
-            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(14.dp)) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.BatteryChargingFull, contentDescription = null, tint = Color(0xFF00897B))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("مدیریت بهینه مصرف باتری (حالت فوق کم‌مصرف)", style = MaterialTheme.typography.titleSmall)
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "برنامه بدون هیچ سرویس پس‌زمینه دائم طراحی شده و مصرف باتری آن نزدیک به صفر است. برای اطمینان از دریافت آنی پیامک‌های بانکی هنگام قفل بودن گوشی، وضعیت بهینه‌سازی را بررسی کنید:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (isBatteryUnrestricted) "وضعیت: بهینه و فعال ✅" else "وضعیت: محدودیت سیستم فعال",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isBatteryUnrestricted) Color(0xFF00897B) else Color(0xFFE65100)
+                        )
+                        OutlinedButton(
+                            onClick = {
+                                try {
+                                    val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                                    context.startActivity(intent)
+                                } catch (e: Exception) {
+                                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                        data = Uri.fromParts("package", context.packageName, null)
+                                    }
+                                    context.startActivity(intent)
+                                }
+                            }
+                        ) {
+                            Text("تنظیمات باتری گوشی", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(16.dp)) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Rounded.FormatSize, contentDescription = null, tint = Color(0xFF0F2942))
@@ -1167,8 +1518,34 @@ fun SettingsAndReconciliationScreen(
             }
         }
 
+        // تنظیم حالت پیش‌فرض نمودار صفحه داشبورد (سالانه یا ماهانه)
         item {
-            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(14.dp)) {
+            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(16.dp)) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.BarChart, contentDescription = null, tint = Color(0xFF0F2942))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("نمای پیش‌فرض نمودار صفحه داشبورد", style = MaterialTheme.typography.titleSmall)
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text("انتخاب کنید نمودار داشبورد ابتدا سال‌ها را نمایش دهد یا تمام ماه‌ها را:", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ChartViewMode.entries.forEach { mode ->
+                            FilterChip(
+                                selected = chartViewMode == mode,
+                                onClick = { onChartViewModeChange(mode) },
+                                label = { Text(mode.title, style = MaterialTheme.typography.labelSmall) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(16.dp)) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Rounded.AccountBalance, contentDescription = null, tint = Color(0xFF0F2942))
@@ -1176,7 +1553,7 @@ fun SettingsAndReconciliationScreen(
                         Text("مدیریت صندوق‌ها و تخصیص حساب‌های بانکی", style = MaterialTheme.typography.titleSmall)
                     }
                     Spacer(modifier = Modifier.height(6.dp))
-                    Text("در صورت نیاز صندوق جدید بسازید و مشخص کنید هر حساب مربوط به کدام بخش است:", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    Text("صندوق‌های دلخواه بسازید و مشخص کنید هر حساب مربوط به کدام بخش است:", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
 
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1200,7 +1577,7 @@ fun SettingsAndReconciliationScreen(
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                         Text(profile.accountKey, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
                         if (latestBal != null) {
-                            Text("موجودی: ${formatCurrency(latestBal)} ریال", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2E7D32))
+                            Text("موجودی: ${formatCurrency(latestBal)} ریال", style = MaterialTheme.typography.labelSmall, color = Color(0xFF00897B))
                         }
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             items(customScopes) { sc ->
@@ -1217,16 +1594,16 @@ fun SettingsAndReconciliationScreen(
         }
 
         item {
-            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(14.dp)) {
+            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(16.dp)) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.UploadFile, contentDescription = null, tint = Color(0xFF1565C0))
+                        Icon(Icons.Rounded.UploadFile, contentDescription = null, tint = Color(0xFF00796B))
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("بارگذاری صورت‌حساب بانکی (اکسل XLS/XLSX/CSV یا PDF)", style = MaterialTheme.typography.titleSmall)
                     }
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "فایل خروجی همراه بام / اینترنت‌بانک (اکسل یا PDF) را انتخاب کنید تا رکوردهای جاافتاده و شماره کارت واریزکنندگان استخراج و مغایرت‌ها رفع شوند:",
+                        text = "فایل خروجی همراه بام / اینترنت‌بانک را انتخاب کنید تا رکوردهای جاافتاده و شماره کارت واریزکنندگان استخراج و مغایرت‌ها رفع شوند:",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color.Gray
                     )
@@ -1246,7 +1623,7 @@ fun SettingsAndReconciliationScreen(
                         Button(
                             onClick = { statementPickerLauncher.launch(arrayOf("*/*")) },
                             modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1565C0))
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00796B))
                         ) {
                             Icon(Icons.Rounded.FileUpload, contentDescription = null)
                             Spacer(modifier = Modifier.width(6.dp))
@@ -1258,13 +1635,13 @@ fun SettingsAndReconciliationScreen(
         }
 
         item {
-            Text("مغایرت‌های مانده حساب (${discrepancies.size})", style = MaterialTheme.typography.titleSmall, color = Color(0xFFC62828))
+            Text("مغایرت‌های مانده حساب (${discrepancies.size})", style = MaterialTheme.typography.titleSmall, color = Color(0xFFE53935))
         }
         if (discrepancies.isEmpty()) {
             item {
-                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E9))) {
+                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFE0F2F1))) {
                     Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = Color(0xFF2E7D32))
+                        Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = Color(0xFF00897B))
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("تمام حساب‌ها تراز هستند و هیچ مغایرتی وجود ندارد.", style = MaterialTheme.typography.bodySmall)
                     }
@@ -1322,9 +1699,9 @@ fun TransactionCard(
     onClick: () -> Unit
 ) {
     val statusColor = when (transaction.type) {
-        TransactionType.DEPOSIT -> Color(0xFF2E7D32)
-        TransactionType.WITHDRAWAL -> Color(0xFFC62828)
-        TransactionType.INTERNAL -> Color(0xFF0277BD)
+        TransactionType.DEPOSIT -> Color(0xFF00897B)
+        TransactionType.WITHDRAWAL -> Color(0xFFE53935)
+        TransactionType.INTERNAL -> Color(0xFF1E88E5)
         TransactionType.UNKNOWN -> Color.Gray
     }
     val typeLabel = when (transaction.type) {
@@ -1344,7 +1721,7 @@ fun TransactionCard(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick() },
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
@@ -1364,17 +1741,22 @@ fun TransactionCard(
                         style = MaterialTheme.typography.labelLarge
                     )
                 }
-                Surface(
-                    color = if (transaction.scope == "مدیریت ساختمان") Color(0xFFE8EAF6) else Color(0xFFE0F2F1),
-                    shape = RoundedCornerShape(6.dp)
-                ) {
-                    Text(
-                        text = transaction.scope,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF0F2942),
-                        fontWeight = FontWeight.Bold
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (transaction.receiptImagePath.isNotEmpty()) {
+                        Icon(Icons.Rounded.AttachFile, contentDescription = "سند تصویری", tint = Color(0xFF00796B), modifier = Modifier.size(16.dp))
+                    }
+                    Surface(
+                        color = if (transaction.scope == "مدیریت ساختمان") Color(0xFFE0F2F1) else Color(0xFFE8EAF6),
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Text(
+                            text = transaction.scope,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF0F2942),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
 
@@ -1435,7 +1817,7 @@ fun TransactionCard(
                         text = when {
                             transaction.userNote.isNotBlank() -> transaction.userNote
                             transaction.category.isNotBlank() -> ""
-                            else -> "برای دسته‌بندی یا ثبت واحد لمس کنید..."
+                            else -> "برای دسته‌بندی یا ثبت سند لمس کنید..."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = if (transaction.userNote.isNotBlank()) Color(0xFF0F2942) else Color.Gray,
@@ -1454,23 +1836,42 @@ fun TransactionCard(
 fun TransactionDetailDialog(
     transaction: BankTransaction,
     categories: List<CategoryEntity>,
+    buildingUnits: List<BuildingUnitEntity>,
     onDismiss: () -> Unit,
-    onSave: (String, String, Boolean?, Boolean) -> Unit,
+    onSave: (String, String, Boolean?, Int?, Boolean, String) -> Unit,
     onMarkAsNotBankSms: (Boolean) -> Unit,
     onAddNewCategory: (String) -> Unit
 ) {
     val context = LocalContext.current
     var noteText by remember { mutableStateOf(transaction.userNote) }
     var selectedCategory by remember { mutableStateOf(transaction.category) }
+    var selectedUnitId by remember { mutableStateOf(transaction.unitId) }
+    var receiptPath by remember { mutableStateOf(transaction.receiptImagePath) }
     var isInternalTransfer by remember { mutableStateOf(transaction.type == TransactionType.INTERNAL) }
     var assignUnitToAllPayerDeposits by remember { mutableStateOf(transaction.payerIdentifier.isNotEmpty() && transaction.type == TransactionType.DEPOSIT) }
     var showQuickAddCategory by remember { mutableStateOf(false) }
     var quickNewCatName by remember { mutableStateOf("") }
     var showWrongDetectionConfirm by remember { mutableStateOf(false) }
 
-    val sortedCategories = remember(categories, transaction.type) {
+    val relevantCategories = remember(categories, transaction.scope, transaction.type) {
+        val targetScope = if (transaction.scope == "مدیریت ساختمان") "مدیریت ساختمان" else "شخصی"
         val isExpense = transaction.type != TransactionType.DEPOSIT
-        categories.sortedByDescending { it.isExpense == isExpense }
+        categories
+            .filter { it.scope == targetScope }
+            .sortedByDescending { it.isExpense == isExpense }
+    }
+
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            val savedPath = ImageReceiptHelper.compressAndSaveReceipt(context, uri, transaction.id)
+            if (savedPath != null) {
+                receiptPath = savedPath
+                val kb = ImageReceiptHelper.getFileSizeKb(savedPath)
+                Toast.makeText(context, "تصویر سند با حجم کم ($kb کیلوبایت) پیوست شد", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     val voiceLauncher = rememberLauncherForActivityResult(
@@ -1483,7 +1884,7 @@ fun TransactionDetailDialog(
                 noteText = spoken
                 val suggested = SmartVoiceCategorizer.suggestCategory(
                     spokenText = spoken,
-                    availableCategories = sortedCategories.map { it.name }
+                    availableCategories = relevantCategories.map { it.name }
                 )
                 if (suggested != null) {
                     selectedCategory = suggested
@@ -1530,21 +1931,41 @@ fun TransactionDetailDialog(
                     Text(transaction.rawMessage, modifier = Modifier.padding(8.dp), style = MaterialTheme.typography.bodySmall)
                 }
 
-                if (transaction.payerIdentifier.isNotEmpty() && transaction.type == TransactionType.DEPOSIT) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Surface(color = Color(0xFFE3F2FD), shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier
-                                .padding(8.dp)
-                                .clickable { assignUnitToAllPayerDeposits = !assignUnitToAllPayerDeposits },
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Checkbox(checked = assignUnitToAllPayerDeposits, onCheckedChange = { assignUnitToAllPayerDeposits = it })
-                            Text(
-                                text = "اتصال خودکار شماره کارت/حساب «${transaction.payerIdentifier}» به این واحد برای تمام واریزهای قبلی و بعدی",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF0D47A1)
+                if (transaction.scope == "مدیریت ساختمان" && transaction.type == TransactionType.DEPOSIT && buildingUnits.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("انتخاب واحد پرداخت‌کننده (ایجاد بستانکاری شارژ):", style = MaterialTheme.typography.titleSmall, color = Color(0xFF00695C))
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(vertical = 4.dp)) {
+                        items(buildingUnits) { unit ->
+                            val isSel = selectedUnitId == unit.id
+                            FilterChip(
+                                selected = isSel,
+                                onClick = {
+                                    selectedUnitId = if (isSel) null else unit.id
+                                    if (!isSel) {
+                                        noteText = "${unit.unitNumber} - ${unit.residentName}"
+                                        selectedCategory = "شارژ ماهیانه واحدها"
+                                    }
+                                },
+                                label = { Text("${unit.unitNumber} (${unit.residentName})", style = MaterialTheme.typography.labelSmall) }
                             )
+                        }
+                    }
+
+                    if (transaction.payerIdentifier.isNotEmpty() && selectedUnitId != null) {
+                        Surface(color = Color(0xFFE0F2F1), shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier
+                                    .padding(6.dp)
+                                    .clickable { assignUnitToAllPayerDeposits = !assignUnitToAllPayerDeposits },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(checked = assignUnitToAllPayerDeposits, onCheckedChange = { assignUnitToAllPayerDeposits = it })
+                                Text(
+                                    text = "اتصال دائمی کارت «${transaction.payerIdentifier}» به این واحد",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF004D40)
+                                )
+                            }
                         }
                     }
                 }
@@ -1562,7 +1983,10 @@ fun TransactionDetailDialog(
 
                 if (!isInternalTransfer) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("سرفصل / دسته‌بندی:", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            text = if (transaction.scope == "مدیریت ساختمان") "سرفصل‌های ساختمان:" else "سرفصل‌های شخصی:",
+                            style = MaterialTheme.typography.titleSmall
+                        )
                         TextButton(onClick = { showQuickAddCategory = !showQuickAddCategory }) {
                             Icon(Icons.Rounded.AddCircleOutline, contentDescription = null, modifier = Modifier.size(16.dp))
                             Text("دسته جدید", style = MaterialTheme.typography.labelSmall)
@@ -1596,7 +2020,7 @@ fun TransactionDetailDialog(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        sortedCategories.forEach { cat ->
+                        relevantCategories.forEach { cat ->
                             FilterChip(
                                 selected = selectedCategory == cat.name,
                                 onClick = { selectedCategory = if (selectedCategory == cat.name) "" else cat.name },
@@ -1613,13 +2037,13 @@ fun TransactionDetailDialog(
                     onValueChange = {
                         noteText = it
                         if (!isInternalTransfer && selectedCategory.isEmpty() && it.length >= 3) {
-                            SmartVoiceCategorizer.suggestCategory(it, sortedCategories.map { c -> c.name })?.let { sug ->
+                            SmartVoiceCategorizer.suggestCategory(it, relevantCategories.map { c -> c.name })?.let { sug ->
                                 selectedCategory = sug
                             }
                         }
                     },
-                    label = { Text(if (transaction.scope == "مدیریت ساختمان") "نام واحد یا شرح هزینه" else "شرح سند (تایپ یا میکروفون)") },
-                    placeholder = { Text("مثلاً: واحد ۴ - آقای رضایی یا بنزین...") },
+                    label = { Text("شرح سند (تایپ یا میکروفون)") },
+                    placeholder = { Text("مثلاً: تعمیر آسانسور یا خرید سوپرمارکت...") },
                     trailingIcon = {
                         IconButton(onClick = startVoiceInput) {
                             Icon(Icons.Rounded.Mic, contentDescription = "ورودی صوتی", tint = Color(0xFF0F2942))
@@ -1628,6 +2052,47 @@ fun TransactionDetailDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = { imagePickerLauncher.launch("image/*") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(Icons.Rounded.AddAPhoto, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (receiptPath.isEmpty()) "پیوست تصویر فاکتور / رسید (فشرده‌سازی خودکار)" else "تغییر تصویر پیوست‌شده (${ImageReceiptHelper.getFileSizeKb(receiptPath)} KB)",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+
+                if (receiptPath.isNotEmpty()) {
+                    val bitmap = remember(receiptPath) { BitmapFactory.decodeFile(receiptPath) }
+                    if (bitmap != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            Image(
+                                bitmap = bitmap.asImageBitmap(),
+                                contentDescription = "تصویر سند",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(140.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                            )
+                            IconButton(
+                                onClick = { receiptPath = "" },
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(4.dp)
+                                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(50))
+                            ) {
+                                Icon(Icons.Rounded.Close, contentDescription = "حذف تصویر", tint = Color.White, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                }
 
                 if (showWrongDetectionConfirm) {
                     Spacer(modifier = Modifier.height(10.dp))
@@ -1654,7 +2119,7 @@ fun TransactionDetailDialog(
         confirmButton = {
             Button(onClick = {
                 val transferOverride: Boolean? = if (isInternalTransfer) true else if (transaction.type == TransactionType.INTERNAL) false else null
-                onSave(selectedCategory, noteText.trim(), transferOverride, assignUnitToAllPayerDeposits)
+                onSave(selectedCategory, noteText.trim(), transferOverride, selectedUnitId, assignUnitToAllPayerDeposits, receiptPath)
             }) { Text("ثبت آنی") }
         },
         dismissButton = {
@@ -1667,15 +2132,16 @@ fun TransactionDetailDialog(
 fun CategoryManagerDialog(
     categories: List<CategoryEntity>,
     onDismiss: () -> Unit,
-    onAddCategory: (String, Boolean) -> Unit,
+    onAddCategory: (String, Boolean, String) -> Unit,
     onDeleteCategory: (String) -> Unit
 ) {
     var newName by remember { mutableStateOf("") }
     var isExpense by remember { mutableStateOf(true) }
+    var selectedScope by remember { mutableStateOf("شخصی") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("مدیریت سرفصل‌ها و دسته‌بندی‌ها", style = MaterialTheme.typography.titleMedium) },
+        title = { Text("مدیریت سرفصل‌های مجزای شخصی و ساختمان", style = MaterialTheme.typography.titleMedium) },
         text = {
             Column {
                 OutlinedTextField(
@@ -1690,11 +2156,23 @@ fun CategoryManagerDialog(
                     Text("هزینه", style = MaterialTheme.typography.bodySmall)
                     RadioButton(selected = !isExpense, onClick = { isExpense = false })
                     Text("درآمد", style = MaterialTheme.typography.bodySmall)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    FilterChip(
+                        selected = selectedScope == "شخصی",
+                        onClick = { selectedScope = "شخصی" },
+                        label = { Text("مخصوص شخصی", style = MaterialTheme.typography.labelSmall) }
+                    )
+                    FilterChip(
+                        selected = selectedScope == "مدیریت ساختمان",
+                        onClick = { selectedScope = "مدیریت ساختمان" },
+                        label = { Text("مخصوص ساختمان", style = MaterialTheme.typography.labelSmall) }
+                    )
                     Spacer(modifier = Modifier.weight(1f))
                     Button(onClick = {
                         val t = newName.trim()
                         if (t.isNotEmpty()) {
-                            onAddCategory(t, isExpense)
+                            onAddCategory(t, isExpense, selectedScope)
                             newName = ""
                         }
                     }) { Text("افزودن") }
@@ -1708,7 +2186,7 @@ fun CategoryManagerDialog(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("${cat.name} (${if (cat.isExpense) "هزینه" else "درآمد"})", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                            Text("${cat.name} • [${cat.scope}]", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
                             IconButton(onClick = { onDeleteCategory(cat.name) }, modifier = Modifier.size(28.dp)) {
                                 Icon(Icons.Rounded.DeleteOutline, contentDescription = null, tint = Color.Red, modifier = Modifier.size(16.dp))
                             }
@@ -1721,15 +2199,21 @@ fun CategoryManagerDialog(
     )
 }
 
+/**
+ * ناظر پیامک سازگار با چرخه حیات (Lifecycle-Aware):
+ * فقط زمانی که برنامه روی صفحه باز است فعال می‌شود و هنگام قفل شدن گوشی یا خروج از برنامه
+ * به‌طور خودکار غیرفعال می‌گردد تا هیچ‌گونه مصرف باتری در پس‌زمینه نداشته باشد.
+ */
 @Composable
-fun SmsBroadcastObserver(
+fun LifecycleAwareSmsObserver(
     hasPermission: Boolean,
     onNewBankTransaction: (BankTransaction) -> Unit
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val currentOnNewTransaction by rememberUpdatedState(onNewBankTransaction)
 
-    DisposableEffect(context, hasPermission) {
+    DisposableEffect(context, lifecycleOwner, hasPermission) {
         if (!hasPermission) return@DisposableEffect onDispose { }
 
         val receiver = object : BroadcastReceiver() {
@@ -1748,10 +2232,30 @@ fun SmsBroadcastObserver(
             }
         }
 
-        val intentFilter = IntentFilter(Telephony.Sms.Intents.SMS_RECEIVED_ACTION).apply { priority = 999 }
-        ContextCompat.registerReceiver(context, receiver, intentFilter, ContextCompat.RECEIVER_EXPORTED)
+        var isRegistered = false
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START && !isRegistered) {
+                val intentFilter = IntentFilter(Telephony.Sms.Intents.SMS_RECEIVED_ACTION).apply { priority = 999 }
+                ContextCompat.registerReceiver(context, receiver, intentFilter, ContextCompat.RECEIVER_EXPORTED)
+                isRegistered = true
+            } else if (event == Lifecycle.Event.ON_STOP && isRegistered) {
+                try {
+                    context.unregisterReceiver(receiver)
+                } catch (_: Exception) { }
+                isRegistered = false
+            }
+        }
 
-        onDispose { context.unregisterReceiver(receiver) }
+        lifecycleOwner.lifecycle.addObserver(observer)
+
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            if (isRegistered) {
+                try {
+                    context.unregisterReceiver(receiver)
+                } catch (_: Exception) { }
+            }
+        }
     }
 }
 
@@ -1769,7 +2273,7 @@ fun PermissionRequestView(onRequestPermission: () -> Unit) {
         Text("دسترسی به پیامک‌ها و اعلان‌ها", style = MaterialTheme.typography.titleLarge)
         Spacer(modifier = Modifier.height(12.dp))
         Text(
-            text = "برای استخراج خودکار اسناد بانکی، تفکیک حساب شخصی و ساختمان، کشف مغایرت‌ها و رسم نمودارها، مجوزهای مورد نیاز را تایید کنید.",
+            text = "برای استخراج خودکار اسناد بانکی، مدیریت شارژمان ساختمان، کشف مغایرت‌ها و رسم نمودارها، مجوزهای مورد نیاز را تایید کنید.",
             style = MaterialTheme.typography.bodyMedium,
             color = Color.Gray
         )

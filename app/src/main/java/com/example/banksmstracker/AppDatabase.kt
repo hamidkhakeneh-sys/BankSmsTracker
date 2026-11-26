@@ -8,7 +8,9 @@ data class TransactionNoteEntity(
     @PrimaryKey val smsId: String,
     val note: String = "",
     val category: String = "",
-    val isInternalTransferOverride: Boolean? = null
+    val isInternalTransferOverride: Boolean? = null,
+    val unitId: Int? = null,
+    val receiptImagePath: String = ""
 )
 
 @Entity(tableName = "account_profiles")
@@ -23,7 +25,29 @@ data class AccountProfileEntity(
 @Entity(tableName = "payer_unit_mappings")
 data class PayerUnitMappingEntity(
     @PrimaryKey val payerIdentifier: String,
+    val unitId: Int,
     val unitTitle: String
+)
+
+@Entity(tableName = "building_units")
+data class BuildingUnitEntity(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val unitNumber: String,
+    val residentName: String,
+    val monthlyCharge: Long,
+    val phoneNumber: String = "",
+    val openingBalance: Long = 0L
+)
+
+@Entity(tableName = "unit_charges")
+data class UnitChargeEntity(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val unitId: Int,
+    val amount: Long,
+    val title: String,
+    val persianDate: String,
+    val persianMonthYear: String,
+    val timestampMillis: Long
 )
 
 @Entity(tableName = "imported_bank_records")
@@ -51,7 +75,7 @@ data class IgnoredItemEntity(
 data class CategoryEntity(
     @PrimaryKey val name: String,
     val isExpense: Boolean = true,
-    val scope: String = "ALL"
+    val scope: String = "شخصی"
 )
 
 @Entity(tableName = "app_settings")
@@ -71,9 +95,6 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun saveNotesBatch(notes: List<TransactionNoteEntity>)
 
-    @Query("DELETE FROM transaction_notes WHERE smsId = :smsId")
-    suspend fun deleteNote(smsId: String)
-
     @Query("SELECT * FROM account_profiles")
     suspend fun getAllAccountProfiles(): List<AccountProfileEntity>
 
@@ -88,6 +109,24 @@ interface AppDao {
 
     @Query("DELETE FROM payer_unit_mappings WHERE payerIdentifier = :payerId")
     suspend fun deletePayerMapping(payerId: String)
+
+    @Query("SELECT * FROM building_units ORDER BY id ASC")
+    suspend fun getAllBuildingUnits(): List<BuildingUnitEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun saveBuildingUnit(unit: BuildingUnitEntity): Long
+
+    @Query("DELETE FROM building_units WHERE id = :unitId")
+    suspend fun deleteBuildingUnit(unitId: Int)
+
+    @Query("SELECT * FROM unit_charges ORDER BY timestampMillis DESC")
+    suspend fun getAllUnitCharges(): List<UnitChargeEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertUnitCharges(charges: List<UnitChargeEntity>)
+
+    @Query("DELETE FROM unit_charges WHERE id = :chargeId")
+    suspend fun deleteUnitCharge(chargeId: Int)
 
     @Query("SELECT * FROM imported_bank_records")
     suspend fun getAllImportedRecords(): List<ImportedRecordEntity>
@@ -128,12 +167,14 @@ interface AppDao {
         TransactionNoteEntity::class,
         AccountProfileEntity::class,
         PayerUnitMappingEntity::class,
+        BuildingUnitEntity::class,
+        UnitChargeEntity::class,
         ImportedRecordEntity::class,
         IgnoredItemEntity::class,
         CategoryEntity::class,
         AppSettingEntity::class
     ],
-    version = 6,
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -144,23 +185,24 @@ abstract class AppDatabase : RoomDatabase() {
         private var INSTANCE: AppDatabase? = null
 
         val DEFAULT_CATEGORIES = listOf(
-            CategoryEntity("خوراک و سوپرمارکت", true, "ALL"),
-            CategoryEntity("خودرو و سوخت", true, "ALL"),
-            CategoryEntity("قبوض و اینترنت", true, "ALL"),
-            CategoryEntity("پوشاک و خرید", true, "ALL"),
-            CategoryEntity("درمان و دارو", true, "ALL"),
-            CategoryEntity("رستوران و کافه", true, "ALL"),
-            CategoryEntity("اقساط و وام", true, "ALL"),
-            CategoryEntity("حقوق و دستمزد", false, "ALL"),
-            CategoryEntity("سود و سرمایه‌گذاری", false, "ALL"),
-            CategoryEntity("شارژ ماهیانه واحدها", false, "ALL"),
-            CategoryEntity("صندوق عمرانی ساختمان", false, "ALL"),
-            CategoryEntity("تعمیر و نگهداری آسانسور", true, "ALL"),
-            CategoryEntity("نظافت و سرایداری", true, "ALL"),
-            CategoryEntity("قبوض مشاعات (آب/برق/گاز)", true, "ALL"),
-            CategoryEntity("تاسیسات و موتورخانه", true, "ALL"),
-            CategoryEntity("بیمه و فضای سبز ساختمان", true, "ALL"),
-            CategoryEntity("سایر موارد", true, "ALL")
+            CategoryEntity("خوراک و سوپرمارکت", true, "شخصی"),
+            CategoryEntity("خودرو و سوخت", true, "شخصی"),
+            CategoryEntity("قبوض و اینترنت", true, "شخصی"),
+            CategoryEntity("پوشاک و خرید", true, "شخصی"),
+            CategoryEntity("درمان و دارو", true, "شخصی"),
+            CategoryEntity("رستوران و کافه", true, "شخصی"),
+            CategoryEntity("اقساط و وام", true, "شخصی"),
+            CategoryEntity("حقوق و دستمزد", false, "شخصی"),
+            CategoryEntity("سود و سرمایه‌گذاری", false, "شخصی"),
+            CategoryEntity("سایر هزینه‌های شخصی", true, "شخصی"),
+            CategoryEntity("شارژ ماهیانه واحدها", false, "مدیریت ساختمان"),
+            CategoryEntity("صندوق عمرانی و ذخیره", false, "مدیریت ساختمان"),
+            CategoryEntity("تعمیر و نگهداری آسانسور", true, "مدیریت ساختمان"),
+            CategoryEntity("نظافت و سرایداری", true, "مدیریت ساختمان"),
+            CategoryEntity("قبوض مشاعات (آب/برق/گاز)", true, "مدیریت ساختمان"),
+            CategoryEntity("تاسیسات و موتورخانه", true, "مدیریت ساختمان"),
+            CategoryEntity("بیمه و فضای سبز ساختمان", true, "مدیریت ساختمان"),
+            CategoryEntity("تعمیرات عمومی ساختمان", true, "مدیریت ساختمان")
         )
 
         fun getDatabase(context: Context): AppDatabase {
@@ -168,7 +210,7 @@ abstract class AppDatabase : RoomDatabase() {
                 val instance = Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
-                    "holoo_sms_accounting_v6_db"
+                    "holoo_sharjeman_v8_db"
                 )
                     .fallbackToDestructiveMigration()
                     .build()

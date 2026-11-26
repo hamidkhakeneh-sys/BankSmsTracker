@@ -16,11 +16,12 @@
 
     <application
         android:allowBackup="true"
-        android:icon="@android:drawable/ic_dialog_dialer"
-        android:label="حسابداری پیامکی"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="حسابداری و شارژمان"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
-        tools:replace="android:label">
+        tools:replace="android:label,android:icon,android:roundIcon">
 
         <activity
             android:name=".MainActivity"
@@ -32,6 +33,7 @@
             </intent-filter>
         </activity>
 
+        <!-- گیرنده فوق کم‌مصرف بدون سرویس پس‌زمینه دائم (Zero-Battery Idle Footprint) -->
         <receiver
             android:name=".BackgroundSmsReceiver"
             android:enabled="true"

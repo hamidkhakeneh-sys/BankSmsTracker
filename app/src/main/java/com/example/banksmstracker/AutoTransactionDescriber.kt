@@ -19,13 +19,11 @@ object AutoTransactionDescriber {
     private val knownMerchants = listOf(
         Triple(listOf("digikala", "دیجی کالا", "دیجی‌کالا"), "خرید از سایت دیجی‌کالا", "پوشاک و خرید"),
         Triple(listOf("snappfood", "اسنپ فود", "اسنپ‌فود"), "سفارش غذا از اسنپ‌فود", "رستوران و کافه"),
-        Triple(listOf("snapp", "اسنپ"), "پرداخت در سامانه اسنپ", "حمل‌ونقل"),
-        Triple(listOf("tapsi", "تپسی"), "پرداخت در سامانه تپسی", "حمل‌ونقل"),
+        Triple(listOf("snapp", "اسنپ"), "پرداخت در سامانه اسنپ", "سایر هزینه‌های شخصی"),
+        Triple(listOf("tapsi", "تپسی"), "پرداخت در سامانه تپسی", "سایر هزینه‌های شخصی"),
         Triple(listOf("torob", "ترب"), "خرید از سایت ترب", "پوشاک و خرید"),
         Triple(listOf("basalam", "باسلام"), "خرید از سایت باسلام", "پوشاک و خرید"),
-        Triple(listOf("alibaba", "علی بابا", "علی‌بابا"), "خرید بلیط از علی‌بابا", "حمل‌ونقل"),
-        Triple(listOf("mrbilit", "مستر بلیط"), "خرید بلیط از مستربلیط", "حمل‌ونقل"),
-        Triple(listOf("flightio", "فلایتیو"), "خرید بلیط از فلایتیو", "حمل‌ونقل"),
+        Triple(listOf("alibaba", "علی بابا", "علی‌بابا"), "خرید بلیط از علی‌بابا", "سایر هزینه‌های شخصی"),
         Triple(listOf("okala", "اکالا"), "خرید سوپرمارکتی از اکالا", "خوراک و سوپرمارکت"),
         Triple(listOf("shatel", "شاتل"), "پرداخت اینترنت شاتل", "قبوض و اینترنت"),
         Triple(listOf("asiatech", "آسیاتک"), "پرداخت اینترنت آسیاتک", "قبوض و اینترنت"),
@@ -34,13 +32,7 @@ object AutoTransactionDescriber {
         Triple(listOf("rightel", "رایتل"), "خرید شارژ / بسته رایتل", "قبوض و اینترنت"),
         Triple(listOf("ap.ir", "asanpardakht", "آسان پرداخت"), "پرداخت از طریق آپ (آسان‌پرداخت)", "قبوض و اینترنت"),
         Triple(listOf("bazaar", "کافه بازار"), "خرید از کافه بازار", "پوشاک و خرید"),
-        Triple(listOf("myket", "مایکت"), "خرید از مایکت", "پوشاک و خرید"),
-        Triple(listOf("fidibo", "فیدیبو"), "خرید کتاب از فیدیبو", "پوشاک و خرید"),
-        Triple(listOf("taaghche", "طاقچه"), "خرید کتاب از طاقچه", "پوشاک و خرید"),
-        Triple(listOf("filimo", "فیلیمو"), "خرید اشتراک فیلیمو", "رستوران و کافه"),
-        Triple(listOf("namava", "نماوا"), "خرید اشتراک نماوا", "رستوران و کافه"),
-        Triple(listOf("divar", "دیوار"), "پرداخت آگهی در دیوار", "سایر موارد"),
-        Triple(listOf("sheypoor", "شیپور"), "پرداخت آگهی در شیپور", "سایر موارد")
+        Triple(listOf("myket", "مایکت"), "خرید از مایکت", "پوشاک و خرید")
     )
 
     private val urlRegex = Regex("""(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+\.(?:ir|com|net|org|co|shop|online))""", RegexOption.IGNORE_CASE)
@@ -78,7 +70,7 @@ object AutoTransactionDescriber {
             if (keywords.any { lowerCombined.contains(it) }) {
                 return AutoDescriptionResult(
                     autoNote = title,
-                    suggestedCategory = if (tx.type == TransactionType.WITHDRAWAL) category else ""
+                    suggestedCategory = if (tx.type == TransactionType.WITHDRAWAL && tx.scope != "مدیریت ساختمان") category else ""
                 )
             }
         }
@@ -86,11 +78,11 @@ object AutoTransactionDescriber {
         val urlMatch = urlRegex.find(combinedContext)
         if (urlMatch != null && tx.type == TransactionType.WITHDRAWAL) {
             val domain = urlMatch.groupValues[1].lowercase()
-            val isBankDomain = listOf("bmi.ir", "mellat", "saderat", "tejarat", "sepah", "saman", "bpi.ir", "shaparak").any { domain.contains(it) }
+            val isBankDomain = listOf("bmi.ir", "mellat", "saderat", "tejarat", "sepah", "saman", "bpi.ir", "shaparak", "rqb.ir").any { domain.contains(it) }
             if (!isBankDomain) {
                 return AutoDescriptionResult(
                     autoNote = "خرید اینترنتی از سایت $domain",
-                    suggestedCategory = "پوشاک و خرید"
+                    suggestedCategory = if (tx.scope != "مدیریت ساختمان") "پوشاک و خرید" else ""
                 )
             }
         }
@@ -106,19 +98,21 @@ object AutoTransactionDescriber {
                 normBody.contains("قبض تلفن") || normBody.contains("قبض موبایل") || normBody.contains("مخابرات") ->
                     return AutoDescriptionResult("پرداخت قبض تلفن / موبایل", "قبوض و اینترنت")
                 normBody.contains("پرداخت قبض") || normBody.contains("شناسه قبض") ->
-                    return AutoDescriptionResult("پرداخت قبض", "قبوض و اینترنت")
+                    return AutoDescriptionResult("پرداخت قبض", if (tx.scope == "مدیریت ساختمان") "قبوض مشاعات (آب/برق/گاز)" else "قبوض و اینترنت")
             }
         }
 
         val isTransfer = normBody.contains("انتقال") || normBody.contains("پایا") ||
                 normBody.contains("ساتنا") || normBody.contains("سامانه پل") ||
-                normBody.contains("کارت به کارت") || normBody.contains("انتقالی")
+                normBody.contains("کارت به کارت") || normBody.contains("انتقالی") ||
+                normBody.contains("سند برگشت")
 
         if (isTransfer) {
             val destMatch = destinationCardOrAccRegex.find(normBody)?.groupValues?.get(1)?.trim() ?: tx.payerIdentifier
             val personName = counterPartyNameRegex.find(normBody)?.groupValues?.get(1)?.trim() ?: ""
 
             val transferLabel = when {
+                normBody.contains("سند برگشت") -> "سند برگشت عملیات بانکی"
                 tx.type == TransactionType.WITHDRAWAL && personName.isNotEmpty() -> "انتقال به $personName"
                 tx.type == TransactionType.WITHDRAWAL && destMatch.isNotEmpty() -> "انتقال به حساب/کارت $destMatch"
                 tx.type == TransactionType.WITHDRAWAL -> "انتقال وجه (پایا / کارت به کارت)"

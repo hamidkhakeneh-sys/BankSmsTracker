@@ -25,7 +25,7 @@ object CsvExporter {
             out.write(byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()))
 
             val sb = StringBuilder()
-            sb.appendLine("ردیف,صندوق,تاریخ و ساعت شمسی,بانک و حساب,نوع تراکنش,دسته‌بندی,مبلغ (ریال),مانده حساب (ریال),شناسه واریزکننده,توضیحات / واحد,منبع")
+            sb.appendLine("ردیف,صندوق,تاریخ و ساعت شمسی,بانک و حساب,نوع تراکنش,دسته‌بندی,مبلغ (ریال),مانده حساب (ریال),شناسه واریزکننده,توضیحات / واحد,پیوست سند,منبع")
 
             transactions.forEachIndexed { index, tx ->
                 val rowNum = index + 1
@@ -37,6 +37,7 @@ object CsvExporter {
                 }
                 val balanceText = tx.balance?.toString() ?: ""
                 val sourceText = if (tx.isFromExcel) "صورت‌حساب بانکی" else "پیامک"
+                val hasReceipt = if (tx.receiptImagePath.isNotEmpty()) "دارد" else "ندارد"
 
                 val safeScope = escapeCsv(tx.scope)
                 val safeDate = escapeCsv(tx.persianDate)
@@ -45,7 +46,7 @@ object CsvExporter {
                 val safePayer = escapeCsv(tx.payerIdentifier)
                 val safeNote = escapeCsv(tx.userNote.ifEmpty { tx.transferPairInfo })
 
-                sb.appendLine("$rowNum,$safeScope,$safeDate,$safeAccount,$typeText,$safeCategory,${tx.amount},$balanceText,$safePayer,$safeNote,$sourceText")
+                sb.appendLine("$rowNum,$safeScope,$safeDate,$safeAccount,$typeText,$safeCategory,${tx.amount},$balanceText,$safePayer,$safeNote,$hasReceipt,$sourceText")
             }
 
             out.write(sb.toString().toByteArray(Charsets.UTF_8))

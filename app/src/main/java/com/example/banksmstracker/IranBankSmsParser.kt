@@ -23,6 +23,8 @@ data class BankTransaction(
     val accountKey: String,
     val scope: String,
     val payerIdentifier: String = "",
+    val unitId: Int? = null,
+    val receiptImagePath: String = "",
     val amount: Long,
     val balance: Long?,
     val type: TransactionType,
@@ -77,7 +79,6 @@ object IranBankSmsParser {
             .replace('٩', '9')
     }
 
-    // الگوهای غیرتراکنشی: قبوض، تبلیغات اپراتور، وام و پارکینگ هوشمند حاشیه‌ای (Elit)
     private val nonTransactionKeywords = listOf(
         "رمز", "پویا", "اعتبار این رمز", "کد تایید", "کد ورود",
         "صورتحساب", "صورت حساب", "مهلت پرداخت", "قابل پرداخت", "باقی مانده هزینه",
@@ -90,7 +91,6 @@ object IranBankSmsParser {
         "elit", "پارکینگ", "پارک حاشیه", "عوارض پارک"
     )
 
-    // الگوی تشخیص پلاک خودرو (مثلاً 12-673ب37 یا 12-673د37) که در پیامک‌های پارکینگ هوشمند می‌آید
     private val plateNumberRegex = Regex("""\b\d{2}\s*[\-\s]\s*\d{3}\s*[آ-یa-zA-Z]\s*\d{2}\b""")
 
     private val balanceRegex = Regex(
@@ -98,11 +98,11 @@ object IranBankSmsParser {
     )
 
     private val accountRegex = Regex(
-        """(?:حساب|کارت|ش\.حساب|شماره حساب)\s*[:=\-*]?\s*([\d*\-]{3,16})"""
+        """(?:حساب|کارت|ش\.حساب|شماره حساب)\s*[:=\-*]?\s*([\d*.\-]{3,18})"""
     )
 
     private val payerCardOrAccRegex = Regex(
-        """(?:از کارت|از حساب|مبدا|واریز کننده|توسط)\s*[:=\-*]?\s*([\d*\-]{4,19})"""
+        """(?:از کارت|از حساب|مبدا|واریز کننده|توسط)\s*[:=\-*]?\s*([\d*.\-]{4,19})"""
     )
 
     private val transactionPatterns = listOf(
@@ -120,17 +120,15 @@ object IranBankSmsParser {
         val lowerBody = body.lowercase()
         val lowerSender = normalizePersian(sender).lowercase()
 
-        // ۱. حذف پیامک‌های اطلاع‌رسانی، قبوض، اپراتورها، پارکینگ هوشمند (Elit) و تبلیغات
         if (nonTransactionKeywords.any { lowerBody.contains(it) || lowerSender.contains(it) }) return null
         if (plateNumberRegex.containsMatchIn(body)) return null
 
-        // ۲. شرط الزامی وجود "مانده" یا "موجودی" در پیامک
         val balanceMatch = balanceRegex.find(body) ?: return null
         val balanceAmount = balanceMatch.groupValues[1].replace(",", "").toLongOrNull()
 
         val accMatch = accountRegex.find(body)
         val rawAcc = accMatch?.groupValues?.get(1)?.trim() ?: "اصلی"
-        val cleanAcc = if (rawAcc.length > 6) rawAcc.takeLast(5) else rawAcc
+        val cleanAcc = if (rawAcc.length > 8 && !rawAcc.contains(".")) rawAcc.takeLast(5) else rawAcc
 
         val payerMatch = payerCardOrAccRegex.find(body)
         val rawPayer = payerMatch?.groupValues?.get(1)?.trim() ?: ""
@@ -197,42 +195,44 @@ object IranBankSmsParser {
     }
 
     private fun detectBankName(sender: String, normalizedBody: String): String {
-        val text = normalizePersian("$sender $normalizedBody").lowercase()
-        val cleanedText = text.replace("سامانه", "")
+        val bodyLower = normalizePersian(normalizedBody).lowercase().replace("سامانه", "")
+        val senderLower = normalizePersian(sender).lowercase()
+        val combined = "$senderLower $bodyLower"
 
         return when {
-            cleanedText.contains("بانک تجارت") || cleanedText.contains("tejarat") -> "بانک تجارت"
-            cleanedText.contains("بانک سامان") || cleanedText.contains("saman") -> "بانک سامان"
-            cleanedText.contains("بانک ملت") || cleanedText.contains("mellat") -> "بانک ملت"
-            cleanedText.contains("بانک ملی") || cleanedText.contains("melli") || cleanedText.contains("bmi") -> "بانک ملی"
-            cleanedText.contains("بانک پاسارگاد") || cleanedText.contains("pasargad") || cleanedText.contains("bpi") -> "بانک پاسارگاد"
-            cleanedText.contains("بانک صادرات") || cleanedText.contains("saderat") -> "بانک صادرات"
-            cleanedText.contains("بانک سپه") || cleanedText.contains("sepah") -> "بانک سپه"
-            cleanedText.contains("بانک کشاورزی") || cleanedText.contains("keshavarzi") -> "بانک کشاورزی"
-            cleanedText.contains("بانک مسکن") || cleanedText.contains("maskan") -> "بانک مسکن"
-            cleanedText.contains("بانک رفاه") || cleanedText.contains("refah") -> "بانک رفاه"
-            cleanedText.contains("بانک شهر") || cleanedText.contains("shahr") -> "بانک شهر"
-            cleanedText.contains("بانک اینده") || cleanedText.contains("ayandeh") -> "بانک آینده"
-            cleanedText.contains("بانک رسالت") || cleanedText.contains("resalat") -> "بانک رسالت"
-            cleanedText.contains("بانک پارسیان") || cleanedText.contains("parsian") -> "بانک پارسیان"
-            cleanedText.contains("اقتصاد نوین") || cleanedText.contains("eghtesad") -> "اقتصاد نوین"
-            cleanedText.contains("بانک سینا") || cleanedText.contains("sina") -> "بانک سینا"
-            cleanedText.contains("پست بانک") || cleanedText.contains("post") -> "پست بانک"
-            cleanedText.contains("مهر ایران") || cleanedText.contains("mehr") -> "مهر ایران"
-            cleanedText.contains("blu") || cleanedText.contains("بلو") -> "بلوبانک"
-            cleanedText.contains("تجارت") -> "بانک تجارت"
-            cleanedText.contains("سامان") -> "بانک سامان"
-            cleanedText.contains("ملت") -> "بانک ملت"
-            cleanedText.contains("ملی") -> "بانک ملی"
-            cleanedText.contains("پاسارگاد") -> "بانک پاسارگاد"
-            cleanedText.contains("صادرات") -> "بانک صادرات"
-            cleanedText.contains("سپه") -> "بانک سپه"
-            cleanedText.contains("کشاورزی") -> "بانک کشاورزی"
-            cleanedText.contains("مسکن") -> "بانک مسکن"
-            cleanedText.contains("رفاه") -> "بانک رفاه"
-            cleanedText.contains("شهر") -> "بانک شهر"
-            cleanedText.contains("اینده") -> "بانک آینده"
-            cleanedText.contains("رسالت") -> "بانک رسالت"
+            bodyLower.contains("بانک قرض الحسنه رسالت") || bodyLower.contains("بانک رسالت") -> "بانک رسالت"
+            bodyLower.contains("بانک قرض الحسنه مهر") || bodyLower.contains("مهر ایران") -> "مهر ایران"
+            bodyLower.contains("بانک تجارت") -> "بانک تجارت"
+            bodyLower.contains("بانک سامان") -> "بانک سامان"
+            bodyLower.contains("بانک ملت") -> "بانک ملت"
+            bodyLower.contains("بانک ملی") -> "بانک ملی"
+            bodyLower.contains("بانک پاسارگاد") -> "بانک پاسارگاد"
+            bodyLower.contains("بانک صادرات") -> "بانک صادرات"
+            bodyLower.contains("بانک سپه") -> "بانک سپه"
+            bodyLower.contains("بانک کشاورزی") -> "بانک کشاورزی"
+            bodyLower.contains("بانک مسکن") -> "بانک مسکن"
+            bodyLower.contains("بانک رفاه") -> "بانک رفاه"
+            bodyLower.contains("بانک شهر") -> "بانک شهر"
+            bodyLower.contains("بانک اینده") -> "بانک آینده"
+            bodyLower.contains("بانک پارسیان") -> "بانک پارسیان"
+            bodyLower.contains("اقتصاد نوین") -> "اقتصاد نوین"
+            bodyLower.contains("بانک سینا") -> "بانک سینا"
+            bodyLower.contains("پست بانک") -> "پست بانک"
+            bodyLower.contains("بلوبانک") || bodyLower.contains("بلو بانک") -> "بلوبانک"
+            combined.contains("resalat") || combined.contains("رسالت") -> "بانک رسالت"
+            combined.contains("tejarat") || combined.contains("تجارت") -> "بانک تجارت"
+            combined.contains("saman") || combined.contains("سامان") -> "بانک سامان"
+            combined.contains("mellat") || combined.contains("ملت") -> "بانک ملت"
+            combined.contains("melli") || combined.contains("bmi") || combined.contains("ملی") -> "بانک ملی"
+            combined.contains("pasargad") || combined.contains("bpi") || combined.contains("پاسارگاد") -> "بانک پاسارگاد"
+            combined.contains("saderat") || combined.contains("صادرات") -> "بانک صادرات"
+            combined.contains("sepah") || combined.contains("سپه") -> "بانک سپه"
+            combined.contains("keshavarzi") || combined.contains("کشاورزی") -> "بانک کشاورزی"
+            combined.contains("maskan") || combined.contains("مسکن") -> "بانک مسکن"
+            combined.contains("refah") || combined.contains("رفاه") -> "بانک رفاه"
+            combined.contains("shahr") || combined.contains("شهر") -> "بانک شهر"
+            combined.contains("ayandeh") || combined.contains("اینده") -> "بانک آینده"
+            combined.contains("blu") || combined.contains("بلو") -> "بلوبانک"
             else -> "سایر بانک‌ها"
         }
     }
@@ -341,7 +341,7 @@ fun readAllTransactionsFast(
     context: Context,
     savedNotes: Map<String, TransactionNoteEntity>,
     accountProfiles: Map<String, AccountProfileEntity>,
-    payerMappings: Map<String, String>,
+    payerMappings: Map<String, PayerUnitMappingEntity>,
     importedRecords: List<ImportedRecordEntity>,
     ignoredSmsIds: Set<String>,
     blockedSenders: Set<String>
@@ -387,15 +387,19 @@ fun readAllTransactionsFast(
                 }
 
                 val savedEntity = savedNotes[id]
-                val autoUnitNote = if (tx.payerIdentifier.isNotEmpty()) payerMappings[tx.payerIdentifier] ?: "" else ""
+                val autoMapping = if (tx.payerIdentifier.isNotEmpty()) payerMappings[tx.payerIdentifier] else null
+                val resolvedUnitId = savedEntity?.unitId ?: autoMapping?.unitId
+                val autoUnitNote = autoMapping?.unitTitle ?: ""
                 val finalNote = savedEntity?.note?.ifBlank { autoUnitNote } ?: autoUnitNote
                 val finalCategory = savedEntity?.category?.ifBlank {
-                    if (autoUnitNote.isNotEmpty() && profile.scope == "مدیریت ساختمان") "شارژ ماهیانه واحدها" else ""
-                } ?: if (autoUnitNote.isNotEmpty() && profile.scope == "مدیریت ساختمان") "شارژ ماهیانه واحدها" else ""
+                    if (resolvedUnitId != null && profile.scope == "مدیریت ساختمان") "شارژ ماهیانه واحدها" else ""
+                } ?: if (resolvedUnitId != null && profile.scope == "مدیریت ساختمان") "شارژ ماهیانه واحدها" else ""
 
                 rawTransactions.add(
                     tx.copy(
                         scope = profile.scope,
+                        unitId = resolvedUnitId,
+                        receiptImagePath = savedEntity?.receiptImagePath ?: "",
                         userNote = finalNote,
                         category = finalCategory
                     )
@@ -420,13 +424,16 @@ fun readAllTransactionsFast(
         if (matchingSmsIndex != -1) {
             val existingSms = rawTransactions[matchingSmsIndex]
             val mergedPayer = existingSms.payerIdentifier.ifBlank { imp.payerIdentifier }
-            val autoUnit = if (mergedPayer.isNotEmpty()) payerMappings[mergedPayer] ?: "" else ""
+            val autoMapping = if (mergedPayer.isNotEmpty()) payerMappings[mergedPayer] else null
+            val resolvedUnitId = existingSms.unitId ?: autoMapping?.unitId
+            val autoUnit = autoMapping?.unitTitle ?: ""
             val mergedNote = existingSms.userNote.ifBlank { autoUnit.ifBlank { imp.description } }
             val mergedCat = existingSms.category.ifBlank {
-                if (autoUnit.isNotEmpty() && existingSms.scope == "مدیریت ساختمان") "شارژ ماهیانه واحدها" else ""
+                if (resolvedUnitId != null && existingSms.scope == "مدیریت ساختمان") "شارژ ماهیانه واحدها" else ""
             }
             rawTransactions[matchingSmsIndex] = existingSms.copy(
                 payerIdentifier = mergedPayer,
+                unitId = resolvedUnitId,
                 userNote = mergedNote,
                 category = mergedCat
             )
@@ -446,7 +453,9 @@ fun readAllTransactionsFast(
             )
         }
         val savedEntity = savedNotes[imp.recordId]
-        val autoUnitNote = if (imp.payerIdentifier.isNotEmpty()) payerMappings[imp.payerIdentifier] ?: "" else ""
+        val autoMapping = if (imp.payerIdentifier.isNotEmpty()) payerMappings[imp.payerIdentifier] else null
+        val resolvedUnitId = savedEntity?.unitId ?: autoMapping?.unitId
+        val autoUnitNote = autoMapping?.unitTitle ?: ""
         val finalNote = savedEntity?.note?.ifBlank { autoUnitNote.ifBlank { imp.description } } ?: autoUnitNote.ifBlank { imp.description }
         val yearOnly = impDateOnly.substringBefore("/")
 
@@ -459,6 +468,8 @@ fun readAllTransactionsFast(
                 accountKey = targetAccKey,
                 scope = profile.scope,
                 payerIdentifier = imp.payerIdentifier,
+                unitId = resolvedUnitId,
+                receiptImagePath = savedEntity?.receiptImagePath ?: "",
                 amount = imp.amount,
                 balance = imp.balance,
                 type = if (imp.isDeposit) TransactionType.DEPOSIT else TransactionType.WITHDRAWAL,
@@ -470,7 +481,7 @@ fun readAllTransactionsFast(
                 persianYear = yearOnly,
                 rawMessage = "رکورد صورت‌حساب: ${imp.description}",
                 userNote = finalNote,
-                category = savedEntity?.category ?: if (autoUnitNote.isNotEmpty()) "شارژ ماهیانه واحدها" else ""
+                category = savedEntity?.category ?: if (resolvedUnitId != null) "شارژ ماهیانه واحدها" else ""
             )
         )
     }

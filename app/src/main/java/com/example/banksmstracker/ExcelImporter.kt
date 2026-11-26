@@ -15,8 +15,9 @@ import kotlin.math.abs
 
 object ExcelImporter {
 
-    private val counterCardRegex = Regex("""(?:شماره کارت طرف مقابل|شماره کارت|کارت طرف مقابل)\s*[:=\-]?\s*([\d*\-]{6,19})""")
+    private val counterCardRegex = Regex("""(?:شماره کارت طرف مقابل|شماره کارت|کارت طرف مقابل|شماره حساب طرف مقابل)\s*[:=\-]?\s*([\d*\-]{6,22})""")
     private val counterNameRegex = Regex("""(?:نام کامل طرف مقابل|نام طرف مقابل)\s*[:=\-]?\s*([^،,\n\r]+)""")
+    private val pan16CardRegex = Regex("""\b([56]\d{15})\b""")
     private val fallbackCardRegex = Regex("""([\d]{4}[*\-\s]{0,3}[\d]{4,12})""")
 
     fun parseBankStatementFile(
@@ -146,7 +147,10 @@ object ExcelImporter {
 
         val targetBankName = resolvedAccountKey.substringBefore(" - ").trim()
         val sameBankTransactions = existingTransactions.filter {
-            it.accountKey == resolvedAccountKey || it.bankName == targetBankName
+            it.accountKey == resolvedAccountKey ||
+            it.bankName == targetBankName ||
+            it.bankName.contains(targetBankName.removePrefix("بانک ")) ||
+            targetBankName.contains(it.bankName.removePrefix("بانک "))
         }
 
         var headerRowIndex = -1
@@ -239,12 +243,13 @@ object ExcelImporter {
             val combinedFullText = listOf(descPart, detailsPart, extraPart).filter { it.isNotBlank() }.joinToString(" | ")
 
             val counterCard = counterCardRegex.find(combinedFullText)?.groupValues?.get(1)?.trim()
+                ?: pan16CardRegex.find(combinedFullText)?.groupValues?.get(1)?.trim()
                 ?: fallbackCardRegex.find(combinedFullText)?.groupValues?.get(1)?.trim()
                 ?: ""
             val counterName = counterNameRegex.find(combinedFullText)?.groupValues?.get(1)?.trim() ?: ""
 
             val cleanNote = when {
-                counterName.isNotEmpty() && descPart.isNotEmpty() -> "$descPart ($counterName)"
+                counterName.isNotEmpty() && descPart.isNotEmpty() -> "$descPart • $counterName"
                 counterName.isNotEmpty() -> counterName
                 descPart.isNotEmpty() -> descPart
                 else -> combinedFullText.take(60)

@@ -312,6 +312,35 @@ fun SharjemanBuildingScreen(
                             }
                         )
                     }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                if (units.isEmpty()) {
+                                    Toast.makeText(context, "ابتدا واحدهای ساختمان را تعریف کنید", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    showCreditDialog = true
+                                }
+                            },
+                        color = Color.White.copy(alpha = 0.14f),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Rounded.SwapHoriz, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "انتقال وجه / تقسیم کسر از بدهی واحدهای انتخابی",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1502,26 +1531,61 @@ fun UnitCreditDialog(
     onConfirmCredits: (List<ManualBuildingEntryEntity>) -> Unit
 ) {
     var title by remember { mutableStateOf("") }
-    var amountPerUnitDigits by remember { mutableStateOf("") }
+    var divideTotalAmongSelected by remember { mutableStateOf(true) }
+    var amountDigits by remember { mutableStateOf("") }
     var selectedUnitIds by remember { mutableStateOf<Set<Int>>(emptySet()) }
+
+    val totalOrPerUnitAmt = amountDigits.toLongOrNull() ?: 0L
+    val computedPerUnit = remember(totalOrPerUnitAmt, divideTotalAmongSelected, selectedUnitIds.size) {
+        if (totalOrPerUnitAmt <= 0L || selectedUnitIds.isEmpty()) 0L
+        else if (divideTotalAmongSelected) totalOrPerUnitAmt / selectedUnitIds.size
+        else totalOrPerUnitAmt
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("ثبت بستانکاری برای واحدها", style = MaterialTheme.typography.titleMedium) },
+        title = { Text("کسر از بدهی / بستانکاری واحدها", style = MaterialTheme.typography.titleMedium) },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "اگر مبلغی انتقال داده‌اید و می‌خواهید از بدهی واحدهای انتخابی کم شود، واحدها را انتخاب و نحوه تقسیم را تعیین کنید:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.Gray
+                )
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
-                    label = { Text("عنوان بستانکاری") },
+                    label = { Text("عنوان (مثلاً: انتقال وجه بابت کسر از بدهی)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(
+                        selected = divideTotalAmongSelected,
+                        onClick = { divideTotalAmongSelected = true },
+                        label = { Text("تقسیم مبلغ کل بین واحدها", style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilterChip(
+                        selected = !divideTotalAmongSelected,
+                        onClick = { divideTotalAmongSelected = false },
+                        label = { Text("مبلغ ثابت برای هر واحد", style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
                 RialAmountTextField(
-                    rawDigitsValue = amountPerUnitDigits,
-                    onValueChange = { amountPerUnitDigits = it },
-                    label = "مبلغ برای هر واحد انتخاب‌شده"
+                    rawDigitsValue = amountDigits,
+                    onValueChange = { amountDigits = it },
+                    label = if (divideTotalAmongSelected) "مبلغ کل انتقال‌یافته" else "مبلغ برای هر واحد"
                 )
+                if (computedPerUnit > 0L && selectedUnitIds.isNotEmpty()) {
+                    Text(
+                        text = "سهم هر واحد (${selectedUnitIds.size} واحد): ${formatCurrency(computedPerUnit)} ریال (${formatCurrency(computedPerUnit / 10)} تومان)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF00695C)
+                    )
+                }
                 Text("انتخاب واحدهای مشمول:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                 units.forEach { u ->
                     val isChecked = selectedUnitIds.contains(u.id)
@@ -1541,8 +1605,7 @@ fun UnitCreditDialog(
         },
         confirmButton = {
             Button(onClick = {
-                val amt = amountPerUnitDigits.toLongOrNull() ?: 0L
-                if (amt > 0L && selectedUnitIds.isNotEmpty()) {
+                if (computedPerUnit > 0L && selectedUnitIds.isNotEmpty()) {
                     val now = System.currentTimeMillis()
                     val pDate = PersianDate(now)
                     val dateStr = PersianDateFormat("Y/m/d - H:i").format(pDate)
@@ -1550,8 +1613,8 @@ fun UnitCreditDialog(
                     val entries = selectedUnitIds.map { uId ->
                         ManualBuildingEntryEntity(
                             entryType = "UNIT_CREDIT",
-                            title = title.trim().ifEmpty { "بستانکاری واحد" },
-                            amount = amt,
+                            title = title.trim().ifEmpty { "کسر از بدهی / بستانکاری واحد" },
+                            amount = computedPerUnit,
                             unitId = uId,
                             persianDate = dateStr,
                             persianMonthYear = monthStr,
@@ -1560,7 +1623,7 @@ fun UnitCreditDialog(
                     }
                     onConfirmCredits(entries)
                 }
-            }) { Text("ثبت بستانکاری") }
+            }) { Text("ثبت و کسر از بدهی") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("انصراف") } }
     )

@@ -197,6 +197,7 @@ fun HolooSmsAccountingApp(
     var manualBuildingEntries by remember { mutableStateOf<List<ManualBuildingEntryEntity>>(emptyList()) }
     var buildingName by remember { mutableStateOf("ساختمان من") }
     var autoMonthlyChargeEnabled by remember { mutableStateOf(true) }
+    var smsFromYearMonth by remember { mutableStateOf("همه") }
     var customScopes by remember { mutableStateOf<List<String>>(listOf("شخصی", "مدیریت ساختمان")) }
 
     var isLoading by remember { mutableStateOf(false) }
@@ -338,6 +339,8 @@ fun HolooSmsAccountingApp(
                 var loadedCharges = appDao.getAllUnitCharges()
                 val isAutoChargeOn = settingsMap["auto_monthly_charge"]?.toBooleanStrictOrNull() ?: true
                 autoMonthlyChargeEnabled = isAutoChargeOn
+                val savedFromYm = settingsMap["sms_from_ym"]
+                if (!savedFromYm.isNullOrBlank()) smsFromYearMonth = savedFromYm
 
                 // صدور خودکار شارژ ماهانه در تاریخ ۱ ماه جاری برای تمام واحدها (در صورت فعال بودن)
                 if (isAutoChargeOn && loadedUnits.isNotEmpty()) {
@@ -414,7 +417,8 @@ fun HolooSmsAccountingApp(
                     payerMappings = mappingsMap,
                     importedRecords = importedList,
                     ignoredSmsIds = ignoredIds,
-                    blockedSenders = blockedSenders
+                    blockedSenders = blockedSenders,
+                    fromYearMonth = smsFromYearMonth
                 )
 
                 updatedProfiles.forEach { prof ->
@@ -794,6 +798,14 @@ fun HolooSmsAccountingApp(
                             payerMappings = payerMappings,
                             accountBankMappings = accountBankMappings,
                             ignoredItems = ignoredItems,
+                            smsFromYearMonth = smsFromYearMonth,
+                            onSmsFromYearMonthChange = { chosenYm ->
+                                smsFromYearMonth = chosenYm
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.saveSetting(AppSettingEntity("sms_from_ym", chosenYm))
+                                    fullReloadFromSms()
+                                }
+                            },
                             fontScale = fontScale,
                             chartViewMode = chartViewMode,
                             onChartViewModeChange = { newMode ->
@@ -854,6 +866,22 @@ fun HolooSmsAccountingApp(
                             onSaveAccountBankMapping = { rawAcc, selectedBank ->
                                 coroutineScope.launch(Dispatchers.IO) {
                                     appDao.saveAccountBankMapping(AccountBankMappingEntity(rawAcc, selectedBank))
+                                    val oldProfiles = appDao.getAllAccountProfiles()
+                                    val rawDigits = rawAcc.replace(Regex("""[^\d]"""), "")
+                                    val coreDigits = if (rawDigits.length >= 15) rawDigits.drop(7).take(7) else rawDigits.takeLast(7)
+                                    val matchingOld = oldProfiles.firstOrNull {
+                                        it.accountNumber == coreDigits || it.accountNumber == rawDigits || it.accountKey.contains(coreDigits)
+                                    }
+                                    if (matchingOld != null) {
+                                        val newKey = "$selectedBank - ${matchingOld.accountNumber}"
+                                        appDao.saveAccountProfile(
+                                            matchingOld.copy(
+                                                accountKey = newKey,
+                                                bankName = selectedBank,
+                                                customTitle = newKey
+                                            )
+                                        )
+                                    }
                                     fullReloadFromSms()
                                 }
                             },
@@ -885,6 +913,22 @@ fun HolooSmsAccountingApp(
                     selectedTransaction = null
                     coroutineScope.launch(Dispatchers.IO) {
                         appDao.saveAccountBankMapping(AccountBankMappingEntity(rawAccKey, chosenBank))
+                        val oldProfiles = appDao.getAllAccountProfiles()
+                        val rawDigits = rawAccKey.replace(Regex("""[^\d]"""), "")
+                        val coreDigits = if (rawDigits.length >= 15) rawDigits.drop(7).take(7) else rawDigits.takeLast(7)
+                        val matchingOld = oldProfiles.firstOrNull {
+                            it.accountNumber == coreDigits || it.accountNumber == rawDigits || it.accountKey.contains(coreDigits)
+                        }
+                        if (matchingOld != null) {
+                            val newKey = "$chosenBank - ${matchingOld.accountNumber}"
+                            appDao.saveAccountProfile(
+                                matchingOld.copy(
+                                    accountKey = newKey,
+                                    bankName = chosenBank,
+                                    customTitle = newKey
+                                )
+                            )
+                        }
                         fullReloadFromSms()
                     }
                     Toast.makeText(context, "شماره حساب به «$chosenBank» متصل شد و تمام پیامک‌های مرتبط به‌روز شدند", Toast.LENGTH_LONG).show()
@@ -903,10 +947,11 @@ fun HolooSmsAccountingApp(
                     }
                     Toast.makeText(context, "مبلغ هزینه بین ${generatedCharges.size} واحد تقسیم و بستانکاری‌های موجود اعمال شد", Toast.LENGTH_LONG).show()
                 },
-                onSave = { newCategory, newNote, transferOverride, selectedUnitId, assignUnitToPayerCard, receiptPath ->
+                onSave = { newCategory, newNote, transferOverride, selectedUnitId, applyToBuildingAccounting, assignUnitToPayerCard, receiptPath ->
                     val targetPayer = currentTx.payerIdentifier
                     val unitObj = buildingUnits.find { it.id == selectedUnitId }
                     val autoUnitLabel = if (unitObj != null) "${unitObj.unitNumber} - ${unitObj.residentName}" else newNote
+                    val effectiveUnitIdForBalance = if (applyToBuildingAccounting) selectedUnitId else null
                     val shouldAutoPropagate = assignUnitToPayerCard && targetPayer.isNotEmpty() && selectedUnitId != null
 
                     allTransactions = allTransactions.map { tx ->
@@ -921,7 +966,7 @@ fun HolooSmsAccountingApp(
                                 tx.copy(
                                     userNote = autoUnitLabel,
                                     category = newCategory,
-                                    unitId = selectedUnitId,
+                                    unitId = effectiveUnitIdForBalance,
                                     receiptImagePath = receiptPath,
                                     type = updatedType
                                 )
@@ -929,7 +974,7 @@ fun HolooSmsAccountingApp(
                             shouldAutoPropagate && tx.payerIdentifier == targetPayer -> {
                                 tx.copy(
                                     userNote = autoUnitLabel,
-                                    unitId = selectedUnitId,
+                                    unitId = if (applyToBuildingAccounting) selectedUnitId else tx.unitId,
                                     category = newCategory.ifBlank { "شارژ ماهیانه واحدها" }
                                 )
                             }
@@ -952,7 +997,7 @@ fun HolooSmsAccountingApp(
                                 note = autoUnitLabel,
                                 category = newCategory,
                                 isInternalTransferOverride = transferOverride,
-                                unitId = selectedUnitId,
+                                unitId = effectiveUnitIdForBalance,
                                 receiptImagePath = receiptPath
                             )
                         )
@@ -1581,6 +1626,8 @@ fun SettingsAndReconciliationScreen(
     payerMappings: List<PayerUnitMappingEntity>,
     accountBankMappings: List<AccountBankMappingEntity>,
     ignoredItems: List<IgnoredItemEntity>,
+    smsFromYearMonth: String,
+    onSmsFromYearMonthChange: (String) -> Unit,
     fontScale: Float,
     onFontScaleChange: (Float) -> Unit,
     chartViewMode: ChartViewMode,
@@ -1679,6 +1726,56 @@ fun SettingsAndReconciliationScreen(
                         ) {
                             Text("تنظیمات باتری گوشی", style = MaterialTheme.typography.labelSmall)
                         }
+                    }
+                }
+            }
+        }
+
+        item {
+            var customYmInput by remember(smsFromYearMonth) {
+                mutableStateOf(if (smsFromYearMonth == "همه") "" else smsFromYearMonth)
+            }
+            val presetPeriods = remember(transactions) {
+                val months = transactions.map { it.persianMonthYear }.distinct().sortedDescending().take(6)
+                listOf("همه") + months
+            }
+
+            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(16.dp)) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.DateRange, contentDescription = null, tint = Color(0xFF00796B))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("شروع فراخوانی پیامک‌ها (سال و ماه)", style = MaterialTheme.typography.titleSmall)
+                    }
+                    Text(
+                        text = "مشخص کنید پیامک‌های بانکی از چه سال و ماهی فراخوانی و مدیریت شوند (فعلی: $smsFromYearMonth):",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray
+                    )
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(presetPeriods) { period ->
+                            FilterChip(
+                                selected = smsFromYearMonth == period,
+                                onClick = {
+                                    onSmsFromYearMonthChange(period)
+                                    customYmInput = if (period == "همه") "" else period
+                                },
+                                label = { Text(if (period == "همه") "همه پیامک‌ها" else "از $period", style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = customYmInput,
+                            onValueChange = { customYmInput = it },
+                            placeholder = { Text("سال/ماه مثلاً 1405/06", style = MaterialTheme.typography.bodySmall) },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Button(onClick = {
+                            val chosen = customYmInput.trim().ifEmpty { "همه" }
+                            onSmsFromYearMonthChange(chosen)
+                        }) { Text("اعمال") }
                     }
                 }
             }
@@ -2197,7 +2294,7 @@ fun TransactionDetailDialog(
     onDismiss: () -> Unit,
     onAssignAccountToBank: (String, String) -> Unit = { _, _ -> },
     onSplitBuildingExpense: (List<UnitChargeEntity>) -> Unit = {},
-    onSave: (String, String, Boolean?, Int?, Boolean, String) -> Unit,
+    onSave: (String, String, Boolean?, Int?, Boolean, Boolean, String) -> Unit,
     onMarkAsNotBankSms: (Boolean) -> Unit,
     onAddNewCategory: (String) -> Unit
 ) {
@@ -2205,6 +2302,7 @@ fun TransactionDetailDialog(
     var noteText by remember { mutableStateOf(transaction.userNote) }
     var selectedCategory by remember { mutableStateOf(transaction.category) }
     var selectedUnitId by remember { mutableStateOf(transaction.unitId) }
+    var applyToBuildingAccounting by remember { mutableStateOf(true) }
     var receiptPath by remember { mutableStateOf(transaction.receiptImagePath) }
     var isInternalTransfer by remember { mutableStateOf(transaction.type == TransactionType.INTERNAL) }
     var splitExpenseAmongUnits by remember { mutableStateOf(false) }
@@ -2402,6 +2500,24 @@ fun TransactionDetailDialog(
                                     }
                                 },
                                 label = { Text("${unit.unitNumber} (${unit.residentName})", style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+
+                    if (selectedUnitId != null) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp)
+                                .clickable { applyToBuildingAccounting = !applyToBuildingAccounting },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(checked = applyToBuildingAccounting, onCheckedChange = { applyToBuildingAccounting = it })
+                            Text(
+                                text = if (applyToBuildingAccounting) "اعمال در حساب و بیلان ساختمان (بستانکاری واحد)" else "فقط جهت اتصال / یادداشت (عدم تاثیر در بیلان ساختمان)",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = if (applyToBuildingAccounting) Color(0xFF00695C) else Color.DarkGray
                             )
                         }
                     }

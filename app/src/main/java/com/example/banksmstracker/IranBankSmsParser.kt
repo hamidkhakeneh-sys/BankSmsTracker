@@ -398,7 +398,8 @@ fun readAllTransactionsFast(
     payerMappings: Map<String, PayerUnitMappingEntity>,
     importedRecords: List<ImportedRecordEntity>,
     ignoredSmsIds: Set<String>,
-    blockedSenders: Set<String>
+    blockedSenders: Set<String>,
+    fromYearMonth: String = ""
 ): Pair<List<BankTransaction>, List<AccountProfileEntity>> {
     val rawTransactions = mutableListOf<BankTransaction>()
     val allInboxSms = mutableListOf<RawInboxSms>()
@@ -424,6 +425,11 @@ fun readAllTransactionsFast(
             val body = it.getString(bodyIdx) ?: ""
             val dateMillis = it.getLong(dateIdx)
 
+            if (fromYearMonth.isNotBlank() && fromYearMonth != "همه") {
+                val txYm = PersianDateFormat("Y/m").format(PersianDate(dateMillis))
+                if (txYm < fromYearMonth) continue
+            }
+
             allInboxSms.add(RawInboxSms(id, sender, body, dateMillis))
 
             if (ignoredSmsIds.contains(id)) continue
@@ -432,8 +438,13 @@ fun readAllTransactionsFast(
             IranBankSmsParser.parseSms(id, sender, body, dateMillis)?.let { parsedTx ->
                 // اعمال نگاشت دستی شماره حساب به بانک (در صورتی که کاربر قبلاً این شماره حساب را به بانکی متصل کرده باشد)
                 val rawDigitsOnly = parsedTx.rawAccountNumber.replace(Regex("""[^\d]"""), "")
+                val rawDigitsOnly = parsedTx.rawAccountNumber.replace(Regex("""[^\d]"""), "")
                 val mappedBank = accountBankMappings[parsedTx.rawAccountNumber]
                     ?: accountBankMappings[parsedTx.accountNumber]
+                    ?: accountBankMappings.entries.firstOrNull { (k, _) ->
+                        val kDigits = k.replace(Regex("""[^\d]"""), "")
+                        kDigits.isNotEmpty() && (kDigits == rawDigitsOnly || (kDigits.length >= 6 && rawDigitsOnly.contains(kDigits)))
+                    }?.value
                     ?: accountBankMappings.entries.firstOrNull { (k, _) ->
                         val kDigits = k.replace(Regex("""[^\d]"""), "")
                         kDigits.isNotEmpty() && (kDigits == rawDigitsOnly || (kDigits.length >= 6 && rawDigitsOnly.contains(kDigits)))

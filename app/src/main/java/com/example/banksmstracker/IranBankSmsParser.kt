@@ -77,7 +77,7 @@ object IranBankSmsParser {
             .replace('٩', '9')
     }
 
-    // الگوهای دقیق برای حذف پیامک‌های اطلاع‌رسانی، تبلیغات اپراتور، وام و قبوض شرکت برق/مخابرات
+    // الگوهای غیرتراکنشی: قبوض، تبلیغات اپراتور، وام و پارکینگ هوشمند حاشیه‌ای (Elit)
     private val nonTransactionKeywords = listOf(
         "رمز", "پویا", "اعتبار این رمز", "کد تایید", "کد ورود",
         "صورتحساب", "صورت حساب", "مهلت پرداخت", "قابل پرداخت", "باقی مانده هزینه",
@@ -86,10 +86,13 @@ object IranBankSmsParser {
         "بدهی پیشین", "بدهی کل", "تخفیف", "جشنواره", "قرعه کشی", "وام فوری",
         "بسته مکالمه", "شاتل موبایل", "شماره گیری", "سرویس اعتباری", "جیب جت",
         "بازپرداخت خود را", "تسهیلات به مبلغ", "تشکیل پرونده", "طرح یاقوت",
-        "هزینه پیامک ارسالی", "قطع استفاده از سرویس", "عدد 1 را"
+        "هزینه پیامک ارسالی", "قطع استفاده از سرویس", "عدد 1 را",
+        "elit", "پارکینگ", "پارک حاشیه", "عوارض پارک"
     )
 
-    // شرط طلایی کاربر: پیامک بانکی واقعی تقریباً همیشه شامل "مانده" یا "موجودی" حساب است
+    // الگوی تشخیص پلاک خودرو (مثلاً 12-673ب37 یا 12-673د37) که در پیامک‌های پارکینگ هوشمند می‌آید
+    private val plateNumberRegex = Regex("""\b\d{2}\s*[\-\s]\s*\d{3}\s*[آ-یa-zA-Z]\s*\d{2}\b""")
+
     private val balanceRegex = Regex(
         """(?:مانده|موجودی|م\.حساب|باقیمانده)\s*[:=\-]?\s*([\d,]{1,18})\s*(?:ریال|تومان)?"""
     )
@@ -114,11 +117,14 @@ object IranBankSmsParser {
 
     fun parseSms(id: String, sender: String, rawBody: String, timestamp: Long): BankTransaction? {
         val body = normalizePersian(rawBody)
+        val lowerBody = body.lowercase()
+        val lowerSender = normalizePersian(sender).lowercase()
 
-        // ۱. حذف پیامک‌های اطلاع‌رسانی، قبوض، اپراتورها و تبلیغات وام
-        if (nonTransactionKeywords.any { body.contains(it) }) return null
+        // ۱. حذف پیامک‌های اطلاع‌رسانی، قبوض، اپراتورها، پارکینگ هوشمند (Elit) و تبلیغات
+        if (nonTransactionKeywords.any { lowerBody.contains(it) || lowerSender.contains(it) }) return null
+        if (plateNumberRegex.containsMatchIn(body)) return null
 
-        // ۲. شرط الزامی وجود "مانده" یا "موجودی" در پیامک (برای جلوگیری از ورود پیامک‌های غیرتراکنشی)
+        // ۲. شرط الزامی وجود "مانده" یا "موجودی" در پیامک
         val balanceMatch = balanceRegex.find(body) ?: return null
         val balanceAmount = balanceMatch.groupValues[1].replace(",", "").toLongOrNull()
 
@@ -162,7 +168,6 @@ object IranBankSmsParser {
 
         if (type == TransactionType.UNKNOWN) return null
 
-        // ۳. تشخیص دقیق نام بانک (اصلاح باگ تشخیص اشتباه بانک تجارت به جای سامان به خاطر کلمه "سامانه پل")
         val bankName = detectBankName(sender, body)
         val accountKey = "$bankName - $cleanAcc"
         val pDate = PersianDate(timestamp)
@@ -193,10 +198,8 @@ object IranBankSmsParser {
 
     private fun detectBankName(sender: String, normalizedBody: String): String {
         val text = normalizePersian("$sender $normalizedBody").lowercase()
-        // حذف کلمه "سامانه" (مثل سامانه پل، سامانه شتاب، سامانه ساتنا) تا با "بانک سامان" اشتباه نشود!
         val cleanedText = text.replace("سامانه", "")
 
-        // ابتدا بررسی سرشماره‌های معروف و نام صریح "بانک ..."
         return when {
             cleanedText.contains("بانک تجارت") || cleanedText.contains("tejarat") -> "بانک تجارت"
             cleanedText.contains("بانک سامان") || cleanedText.contains("saman") -> "بانک سامان"
@@ -217,7 +220,6 @@ object IranBankSmsParser {
             cleanedText.contains("پست بانک") || cleanedText.contains("post") -> "پست بانک"
             cleanedText.contains("مهر ایران") || cleanedText.contains("mehr") -> "مهر ایران"
             cleanedText.contains("blu") || cleanedText.contains("بلو") -> "بلوبانک"
-            // بررسی سرشماره پیامک بدون کلمه "بانک"
             cleanedText.contains("تجارت") -> "بانک تجارت"
             cleanedText.contains("سامان") -> "بانک سامان"
             cleanedText.contains("ملت") -> "بانک ملت"
@@ -345,6 +347,7 @@ fun readAllTransactionsFast(
     blockedSenders: Set<String>
 ): Pair<List<BankTransaction>, List<AccountProfileEntity>> {
     val rawTransactions = mutableListOf<BankTransaction>()
+    val allInboxSms = mutableListOf<RawInboxSms>()
     val discoveredAccounts = accountProfiles.toMutableMap()
 
     val cursor = context.contentResolver.query(
@@ -363,13 +366,14 @@ fun readAllTransactionsFast(
 
         while (it.moveToNext()) {
             val id = it.getString(idIdx) ?: continue
-            if (ignoredSmsIds.contains(id)) continue
-
             val sender = it.getString(addrIdx) ?: "نامشخص"
-            if (blockedSenders.contains(sender)) continue
-
             val body = it.getString(bodyIdx) ?: ""
             val dateMillis = it.getLong(dateIdx)
+
+            allInboxSms.add(RawInboxSms(id, sender, body, dateMillis))
+
+            if (ignoredSmsIds.contains(id)) continue
+            if (blockedSenders.contains(sender)) continue
 
             IranBankSmsParser.parseSms(id, sender, body, dateMillis)?.let { tx ->
                 val profile = discoveredAccounts.getOrPut(tx.accountKey) {
@@ -402,21 +406,49 @@ fun readAllTransactionsFast(
 
     for (imp in importedRecords) {
         if (ignoredSmsIds.contains(imp.recordId)) continue
-        val profile = discoveredAccounts.getOrPut(imp.accountKey) {
+        val impBankName = imp.accountKey.substringBefore(" - ").trim()
+        val impDateOnly = imp.persianDate.substringBefore(" - ").trim()
+
+        val matchingSmsIndex = rawTransactions.indexOfFirst { smsTx ->
+            val sameBank = smsTx.accountKey == imp.accountKey || smsTx.bankName == impBankName
+            val sameType = (smsTx.type == TransactionType.DEPOSIT) == imp.isDeposit
+            val sameAmount = smsTx.amount == imp.amount
+            val sameDate = smsTx.persianDateOnly == impDateOnly
+            sameBank && sameType && sameAmount && sameDate
+        }
+
+        if (matchingSmsIndex != -1) {
+            val existingSms = rawTransactions[matchingSmsIndex]
+            val mergedPayer = existingSms.payerIdentifier.ifBlank { imp.payerIdentifier }
+            val autoUnit = if (mergedPayer.isNotEmpty()) payerMappings[mergedPayer] ?: "" else ""
+            val mergedNote = existingSms.userNote.ifBlank { autoUnit.ifBlank { imp.description } }
+            val mergedCat = existingSms.category.ifBlank {
+                if (autoUnit.isNotEmpty() && existingSms.scope == "مدیریت ساختمان") "شارژ ماهیانه واحدها" else ""
+            }
+            rawTransactions[matchingSmsIndex] = existingSms.copy(
+                payerIdentifier = mergedPayer,
+                userNote = mergedNote,
+                category = mergedCat
+            )
+            continue
+        }
+
+        val targetAccKey = discoveredAccounts.keys.firstOrNull { it.startsWith("$impBankName - ") && !it.endsWith("اصلی") }
+            ?: imp.accountKey
+
+        val profile = discoveredAccounts.getOrPut(targetAccKey) {
             AccountProfileEntity(
-                accountKey = imp.accountKey,
-                bankName = imp.accountKey.substringBefore(" - "),
-                accountNumber = imp.accountKey.substringAfter(" - ", "اکسل"),
-                customTitle = imp.accountKey,
+                accountKey = targetAccKey,
+                bankName = impBankName,
+                accountNumber = targetAccKey.substringAfter(" - ", "اکسل"),
+                customTitle = targetAccKey,
                 scope = "مدیریت ساختمان"
             )
         }
         val savedEntity = savedNotes[imp.recordId]
         val autoUnitNote = if (imp.payerIdentifier.isNotEmpty()) payerMappings[imp.payerIdentifier] ?: "" else ""
         val finalNote = savedEntity?.note?.ifBlank { autoUnitNote.ifBlank { imp.description } } ?: autoUnitNote.ifBlank { imp.description }
-
-        val dateOnly = imp.persianDate.substringBefore(" - ").trim()
-        val yearOnly = dateOnly.substringBefore("/")
+        val yearOnly = impDateOnly.substringBefore("/")
 
         rawTransactions.add(
             BankTransaction(
@@ -424,7 +456,7 @@ fun readAllTransactionsFast(
                 sender = "فایل بانکی (اکسل/PDF)",
                 bankName = profile.bankName,
                 accountNumber = profile.accountNumber,
-                accountKey = imp.accountKey,
+                accountKey = targetAccKey,
                 scope = profile.scope,
                 payerIdentifier = imp.payerIdentifier,
                 amount = imp.amount,
@@ -433,7 +465,7 @@ fun readAllTransactionsFast(
                 isFromExcel = true,
                 timestampMillis = imp.timestampMillis,
                 persianDate = imp.persianDate,
-                persianDateOnly = dateOnly,
+                persianDateOnly = impDateOnly,
                 persianMonthYear = imp.persianMonthYear,
                 persianYear = yearOnly,
                 rawMessage = "رکورد صورت‌حساب: ${imp.description}",
@@ -443,7 +475,23 @@ fun readAllTransactionsFast(
         )
     }
 
-    val sortedAll = rawTransactions.sortedByDescending { it.timestampMillis }
+    val enrichedTransactions = rawTransactions.map { tx ->
+        if (tx.userNote.isBlank()) {
+            val inferred = AutoTransactionDescriber.inferTransactionDetails(tx, allInboxSms)
+            if (inferred != null) {
+                tx.copy(
+                    userNote = inferred.autoNote,
+                    category = tx.category.ifBlank { inferred.suggestedCategory }
+                )
+            } else {
+                tx
+            }
+        } else {
+            tx
+        }
+    }
+
+    val sortedAll = enrichedTransactions.sortedByDescending { it.timestampMillis }
     val processedTransactions = IranBankSmsParser.detectInternalTransfers(sortedAll, savedNotes)
     return Pair(processedTransactions, discoveredAccounts.values.toList())
 }

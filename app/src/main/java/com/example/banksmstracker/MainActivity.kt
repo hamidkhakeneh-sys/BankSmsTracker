@@ -1116,7 +1116,6 @@ fun SettingsAndReconciliationScreen(
         mutableStateOf(accountProfiles.firstOrNull()?.accountKey ?: "")
     }
 
-    // انتخاب فایل اکسل (.xls, .xlsx, .csv) یا PDF صورت‌حساب بانک (مانند خروجی همراه بام)
     val statementPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->

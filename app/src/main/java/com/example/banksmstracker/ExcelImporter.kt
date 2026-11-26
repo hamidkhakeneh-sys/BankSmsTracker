@@ -11,18 +11,14 @@ import org.apache.poi.ss.usermodel.WorkbookFactory
 import saman.zamani.persiandate.PersianDate
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import kotlin.math.abs
 
 object ExcelImporter {
 
-    // الگوی استخراج شماره کارت طرف مقابل یا نام کامل طرف مقابل از فایل‌های همراه بام / بانک ملی و سایر بانک‌ها
     private val counterCardRegex = Regex("""(?:شماره کارت طرف مقابل|شماره کارت|کارت طرف مقابل)\s*[:=\-]?\s*([\d*\-]{6,19})""")
     private val counterNameRegex = Regex("""(?:نام کامل طرف مقابل|نام طرف مقابل)\s*[:=\-]?\s*([^،,\n\r]+)""")
     private val fallbackCardRegex = Regex("""([\d]{4}[*\-\s]{0,3}[\d]{4,12})""")
 
-    /**
-     * پشتیبانی یکپارچه از فایل‌های اکسل واقعی (.xls و .xlsx مانند خروجی همراه بام بانک ملی)،
-     * فایل‌های CSV و همچنین فایل‌های صورت‌حساب PDF بانکی
-     */
     fun parseBankStatementFile(
         context: Context,
         uri: Uri,
@@ -34,7 +30,6 @@ object ExcelImporter {
             fileName.endsWith(".pdf") -> extractRowsFromPdf(context, uri)
             fileName.endsWith(".xls") || fileName.endsWith(".xlsx") -> extractRowsFromExcel(context, uri)
             else -> {
-                // تلاش برای خواندن به عنوان اکسل باینری (چون گاهی فایل .xls پسوند ندارد) و در صورت خطا خواندن به عنوان CSV
                 try {
                     extractRowsFromExcel(context, uri)
                 } catch (e: Exception) {
@@ -93,7 +88,6 @@ object ExcelImporter {
             val fullText = IranBankSmsParser.normalizePersian(stripper.getText(doc))
             doc.close()
 
-            // تجزیه خطوط PDF بانکی به ستون‌های تاریخ، مبلغ، نوع و مانده
             val dateRegex = Regex("""(1[34]\d{2}/\d{1,2}/\d{1,2})""")
             val numRegex = Regex("""([\d,]{4,15})""")
 
@@ -128,18 +122,33 @@ object ExcelImporter {
 
     private fun processParsedRows(
         rows: List<List<String>>,
-        targetAccountKey: String,
+        selectedAccountKey: String,
         existingTransactions: List<BankTransaction>
     ): List<ImportedRecordEntity> {
         val newRecords = mutableListOf<ImportedRecordEntity>()
 
-        // امضای تراکنش‌های موجود برای جلوگیری از ثبت تکراری
-        val existingSignatures = existingTransactions
-            .filter { it.accountKey == targetAccountKey }
-            .map { "${it.persianDateOnly}_${it.amount}_${it.type == TransactionType.DEPOSIT}" }
-            .toSet()
+        var detectedShortAcc = ""
+        for (i in 0 until minOf(10, rows.size)) {
+            val rowStr = rows[i].joinToString(" ")
+            val accMatch = Regex("""(?:شماره حساب|حساب)\s*[:=\-]?\s*(\d{5,18})""").find(rowStr)
+            if (accMatch != null) {
+                detectedShortAcc = accMatch.groupValues[1].takeLast(5)
+                break
+            }
+        }
 
-        // تشخیص خودکار ستون‌ها بر اساس سرتیتر فایل (مانند ردیف ۸ فایل همراه بام بانک ملی: ردیف، تاریخ، زمان، شعبه، نوع، مبلغ، شماره پیگیری، اطلاعات تکمیلی، شرح، توضیحات، مانده...)
+        val resolvedAccountKey = if (detectedShortAcc.isNotEmpty()) {
+            existingTransactions.firstOrNull { it.accountKey.endsWith(detectedShortAcc) }?.accountKey
+                ?: selectedAccountKey
+        } else {
+            selectedAccountKey
+        }
+
+        val targetBankName = resolvedAccountKey.substringBefore(" - ").trim()
+        val sameBankTransactions = existingTransactions.filter {
+            it.accountKey == resolvedAccountKey || it.bankName == targetBankName
+        }
+
         var headerRowIndex = -1
         var dateCol = -1
         var timeCol = -1
@@ -185,7 +194,6 @@ object ExcelImporter {
             val cols = rows[r]
             if (cols.size < 3) continue
 
-            // پیدا کردن ستون تاریخ
             val rawDate = if (dateCol != -1) cols.getOrNull(dateCol)?.trim() ?: ""
             else cols.firstOrNull { it.matches(Regex(""".*1[34]\d{2}/\d{1,2}/\d{1,2}.*""")) }?.trim() ?: ""
 
@@ -196,7 +204,6 @@ object ExcelImporter {
             val rawTime = if (timeCol != -1) cols.getOrNull(timeCol)?.trim() ?: "12:00" else "12:00"
             val shortTime = if (rawTime.length >= 5) rawTime.take(5) else "12:00"
 
-            // استخراج مبلغ و تشخیص واریز یا برداشت (پشتیبانی هم از ستون مشترک "نوع + مبلغ" مانند همراه بام و هم از ستون‌های مجزای "بدهکار / بستانکار")
             var isDeposit = false
             var amount = 0L
 
@@ -215,7 +222,6 @@ object ExcelImporter {
                     amount = deb
                 }
             } else {
-                // حالت PDF یا فایل‌های بدون هدر استاندارد
                 val typeStr = cols.getOrNull(1) ?: ""
                 isDeposit = typeStr.contains("واریز") || typeStr.contains("بستانکار")
                 amount = parseCleanLong(cols.getOrNull(2))
@@ -226,14 +232,12 @@ object ExcelImporter {
             val balAmt = if (balanceCol != -1) parseCleanLong(cols.getOrNull(balanceCol))
             else parseCleanLong(cols.lastOrNull())
 
-            // تجمیع شرح و توضیحات تکمیلی (شامل شماره کارت طرف مقابل و نام کامل طرف مقابل در فایل همراه بام)
             val descPart = if (descCol != -1) cols.getOrNull(descCol)?.trim() ?: "" else cols.getOrNull(3)?.trim() ?: ""
             val detailsPart = if (detailsCol != -1) cols.getOrNull(detailsCol)?.trim() ?: "" else ""
             val extraPart = if (extraInfoCol != -1) cols.getOrNull(extraInfoCol)?.trim() ?: "" else ""
 
             val combinedFullText = listOf(descPart, detailsPart, extraPart).filter { it.isNotBlank() }.joinToString(" | ")
 
-            // استخراج شماره کارت طرف مقابل و نام واریزکننده (مثلاً "شماره کارت طرف مقابل : 6037997389303992" و "نام کامل طرف مقابل : هادی عسکری")
             val counterCard = counterCardRegex.find(combinedFullText)?.groupValues?.get(1)?.trim()
                 ?: fallbackCardRegex.find(combinedFullText)?.groupValues?.get(1)?.trim()
                 ?: ""
@@ -246,13 +250,21 @@ object ExcelImporter {
                 else -> combinedFullText.take(60)
             }
 
-            val signature = "${normalizedDate}_${amount}_$isDeposit"
-            if (!existingSignatures.contains(signature)) {
+            val alreadyExists = sameBankTransactions.any { existing ->
+                val sameType = (existing.type == TransactionType.DEPOSIT) == isDeposit ||
+                        existing.type == TransactionType.INTERNAL
+                val sameAmount = existing.amount == amount
+                val sameDate = existing.persianDateOnly == normalizedDate
+                val sameBalance = balAmt > 0 && existing.balance != null && abs(existing.balance - balAmt) <= 10L
+                (sameDate && sameAmount && sameType) || (sameDate && sameBalance && sameAmount)
+            }
+
+            if (!alreadyExists) {
                 val timestamp = shamsiToMillis(normalizedDate, shortTime) + r * 100L
                 newRecords.add(
                     ImportedRecordEntity(
-                        recordId = "stmt_${targetAccountKey.hashCode()}_${normalizedDate}_${amount}_$r",
-                        accountKey = targetAccountKey,
+                        recordId = "stmt_${resolvedAccountKey.hashCode()}_${normalizedDate}_${amount}_$r",
+                        accountKey = resolvedAccountKey,
                         amount = amount,
                         balance = if (balAmt > 0) balAmt else null,
                         isDeposit = isDeposit,

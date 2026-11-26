@@ -133,7 +133,7 @@ interface AppDao {
         CategoryEntity::class,
         AppSettingEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -168,7 +168,7 @@ abstract class AppDatabase : RoomDatabase() {
                 val instance = Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
-                    "holoo_sms_accounting_v5_db"
+                    "holoo_sms_accounting_v6_db"
                 )
                     .fallbackToDestructiveMigration()
                     .build()

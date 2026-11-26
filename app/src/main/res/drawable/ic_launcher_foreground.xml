@@ -4,13 +4,26 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- قاب لوگوی تجاری هم‌تراز -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M30,36 C30,32.7 32.7,30 36,30 L72,30 C75.3,30 78,32.7 78,36 L78,72 C78,75.3 75.3,78 72,78 L36,78 C32.7,78 30,75.3 30,72 Z" />
+        android:pathData="M28,32 C28,28.7 30.7,26 34,26 L74,26 C77.3,26 80,28.7 80,32 L80,76 C80,79.3 77.3,82 74,82 L34,82 C30.7,82 28,79.3 28,76 Z" />
+    <!-- شاهین ترازو و محور تعادل طلایی -->
     <path
-        android:fillColor="#00897B"
-        android:pathData="M38,58 L46,58 L46,68 L38,68 Z M50,48 L58,48 L58,68 L50,68 Z M62,40 L70,40 L70,68 L62,68 Z" />
+        android:fillColor="#F59E0B"
+        android:pathData="M35,36 L73,36 L73,40 L35,40 Z" />
     <path
-        android:fillColor="#FFB300"
-        android:pathData="M38,42 L48,42 L48,46 L38,46 Z" />
+        android:fillColor="#F59E0B"
+        android:pathData="M52,31 L56,31 L56,42 L52,42 Z" />
+    <!-- نماد حسابداری مالی (سمت چپ) -->
+    <path
+        android:fillColor="#091E3A"
+        android:pathData="M36,56 L42,56 L42,72 L36,72 Z M45,46 L51,46 L51,72 L45,72 Z" />
+    <!-- نماد برج مسکونی و مجتمع (سمت راست) -->
+    <path
+        android:fillColor="#00796B"
+        android:pathData="M56,44 L72,44 L72,72 L56,72 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M59,48 L62,48 L62,52 L59,52 Z M65,48 L68,48 L68,52 L65,52 Z M59,55 L62,55 L62,59 L59,59 Z M65,55 L68,55 L68,59 L65,59 Z M59,62 L62,62 L62,66 L59,66 Z M65,62 L68,62 L68,66 L65,66 Z" />
 </vector>

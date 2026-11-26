@@ -29,6 +29,13 @@ data class PayerUnitMappingEntity(
     val unitTitle: String
 )
 
+// نگاشت دائمی شماره حساب استخراج‌شده از پیامک به یکی از بانک‌های ایران (انتخابی توسط کاربر)
+@Entity(tableName = "account_bank_mappings")
+data class AccountBankMappingEntity(
+    @PrimaryKey val rawAccountNumber: String, // مثلاً "361970003195155001" یا "3195155"
+    val bankName: String                      // مثلاً "بانک قرض‌الحسنه مهر ایران"
+)
+
 @Entity(tableName = "building_units")
 data class BuildingUnitEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
@@ -132,6 +139,16 @@ interface AppDao {
     @Query("DELETE FROM payer_unit_mappings WHERE payerIdentifier = :payerId")
     suspend fun deletePayerMapping(payerId: String)
 
+    // نگاشت شماره حساب به بانک
+    @Query("SELECT * FROM account_bank_mappings")
+    suspend fun getAllAccountBankMappings(): List<AccountBankMappingEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun saveAccountBankMapping(mapping: AccountBankMappingEntity)
+
+    @Query("DELETE FROM account_bank_mappings WHERE rawAccountNumber = :accNum")
+    suspend fun deleteAccountBankMapping(accNum: String)
+
     @Query("SELECT * FROM building_units ORDER BY id ASC")
     suspend fun getAllBuildingUnits(): List<BuildingUnitEntity>
 
@@ -202,6 +219,7 @@ interface AppDao {
         TransactionNoteEntity::class,
         AccountProfileEntity::class,
         PayerUnitMappingEntity::class,
+        AccountBankMappingEntity::class,
         BuildingUnitEntity::class,
         UnitChargeEntity::class,
         ManualBuildingEntryEntity::class,
@@ -210,7 +228,7 @@ interface AppDao {
         CategoryEntity::class,
         AppSettingEntity::class
     ],
-    version = 12,
+    version = 13,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -241,15 +259,20 @@ abstract class AppDatabase : RoomDatabase() {
             CategoryEntity("تعمیرات عمومی ساختمان", true, "مدیریت ساختمان")
         )
 
-        fun getDatabase(context: Context): AppDatabase {
+        fun getDatabase(context: Context, passphrase: ByteArray? = null): AppDatabase {
             return INSTANCE ?: synchronized(this) {
-                val instance = Room.databaseBuilder(
+                val builder = Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
-                    "holoo_sharjeman_v12_db"
-                )
-                    .fallbackToDestructiveMigration()
-                    .build()
+                    "hamtaraz_encrypted_v14_db"
+                ).fallbackToDestructiveMigration()
+
+                if (passphrase != null && passphrase.isNotEmpty()) {
+                    val factory = net.sqlcipher.database.SupportFactory(passphrase)
+                    builder.openHelperFactory(factory)
+                }
+
+                val instance = builder.build()
                 INSTANCE = instance
                 instance
             }

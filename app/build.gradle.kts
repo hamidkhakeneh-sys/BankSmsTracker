@@ -13,8 +13,8 @@ android {
         applicationId = "com.example.banksmstracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "12.0"
+        versionCode = 14
+        versionName = "14.0"
     }
 
     buildTypes {
@@ -62,6 +62,9 @@ dependencies {
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")
     ksp("androidx.room:room-compiler:$roomVersion")
+    // رمزنگاری کامل دیتابیس SQLite با نام کاربری و رمز عبور (SQLCipher)
+    implementation("net.zetetic:android-database-sqlcipher:4.5.4")
+    implementation("androidx.sqlite:sqlite-ktx:2.4.0")
 
     implementation("com.github.samanzamani:PersianDate:1.7.1")
     implementation("org.apache.poi:poi:5.2.5")

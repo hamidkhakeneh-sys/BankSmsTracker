@@ -1,19 +1,20 @@
 package com.example.banksmstracker
 
+import android.Manifest
+import android.content.Context
 import android.content.Intent
-import android.graphics.BitmapFactory
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.ContactsContract
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -22,15 +23,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import saman.zamani.persiandate.PersianDate
 import saman.zamani.persiandate.PersianDateFormat
 
@@ -46,13 +45,11 @@ data class BuildingLedgerItem(
     val title: String,
     val subtitle: String,
     val unitBadge: String,
+    val payerAccountBadge: String, // نمایش شماره حساب/کارت واریزکننده در بخش ساختمان
     val amount: Long,
     val isDeposit: Boolean,
     val persianDate: String,
-    val persianDateOnly: String,
     val timestampMillis: Long,
-    val sourceTag: String,
-    val receiptPath: String = "",
     val manualEntryId: Int? = null,
     val linkedSmsTx: BankTransaction? = null
 )
@@ -69,6 +66,7 @@ fun SharjemanBuildingScreen(
     onToggleAutoMonthlyCharge: (Boolean) -> Unit,
     onUpdateBuildingName: (String) -> Unit,
     onAddOrUpdateUnit: (BuildingUnitEntity) -> Unit,
+    onBatchCreateUnits: (String, List<BuildingUnitEntity>) -> Unit,
     onDeleteUnit: (Int) -> Unit,
     onDeclareDebtBatch: (List<UnitChargeEntity>) -> Unit,
     onDeleteCharge: (Int) -> Unit,
@@ -78,26 +76,24 @@ fun SharjemanBuildingScreen(
     onSelectBankTransaction: (BankTransaction) -> Unit
 ) {
     val context = LocalContext.current
-    var activeSubTab by remember { mutableIntStateOf(0) } // 0: بیلان واحدها، 1: گردش صندوق ساختمان
+    var activeSubTab by remember { mutableIntStateOf(0) } // 0: واحدها و بیلان، 1: گردش صندوق ساختمان
 
-    // دیالوگ‌های عملیاتی ۴ گانه (الهام‌گرفته از شارژمام)
     var showExpenseDialog by remember { mutableStateOf(false) }
     var showIncomeDialog by remember { mutableStateOf(false) }
     var showDebtDialog by remember { mutableStateOf(false) }
     var showCreditDialog by remember { mutableStateOf(false) }
 
     var showAddUnitDialog by remember { mutableStateOf(false) }
+    var showBatchWizardDialog by remember { mutableStateOf(false) }
     var editingUnit by remember { mutableStateOf<BuildingUnitEntity?>(null) }
     var selectedUnitForDetail by remember { mutableStateOf<UnitFinancialSummary?>(null) }
     var showBuildingSettingsDialog by remember { mutableStateOf(false) }
 
-    // فیلترهای گردش صندوق
     var ledgerSearch by remember { mutableStateOf("") }
-    var ledgerTypeFilter by remember { mutableIntStateOf(0) } // 0: همه، 1: واریزها، 2: برداشت‌ها
+    var ledgerTypeFilter by remember { mutableIntStateOf(0) }
 
     val unitMap = remember(units) { units.associateBy { it.id } }
 
-    // محاسبه بیلان مالی تک‌تک واحدها
     val unitSummaries = remember(units, unitCharges, manualEntries, buildingTransactions) {
         units.map { unit ->
             val chargesSum = unitCharges.filter { it.unitId == unit.id }.sumOf { it.amount }
@@ -124,7 +120,6 @@ fun SharjemanBuildingScreen(
         }
     }
 
-    // محاسبه موجودی کل صندوق (حساب بانکی ساختمان + درآمد نقدی دستی - هزینه نقدی دستی)
     val buildingBankBalance = remember(buildingTransactions) {
         buildingTransactions
             .groupBy { it.accountKey }
@@ -147,25 +142,19 @@ fun SharjemanBuildingScreen(
     }
     val totalResidentsCount = remember(units) { units.sumOf { it.residentCount } }
 
-    // ترکیب تراکنش‌های بانکی ساختمان و اسناد دستی صندوق در یک گردش صندوق یکپارچه (همراه با نمایش اسم واحد!)
     val combinedLedger = remember(buildingTransactions, manualEntries, unitMap, ledgerSearch, ledgerTypeFilter) {
         val itemsList = mutableListOf<BuildingLedgerItem>()
 
         buildingTransactions.forEach { tx ->
             if (tx.type == TransactionType.DEPOSIT || tx.type == TransactionType.WITHDRAWAL) {
                 val unitObj = tx.unitId?.let { unitMap[it] }
-                val unitLabel = when {
-                    unitObj != null -> "${unitObj.unitNumber} (${unitObj.residentName})"
-                    tx.userNote.isNotBlank() -> tx.userNote
-                    else -> ""
-                }
                 val mainTitle = when {
                     tx.type == TransactionType.DEPOSIT && unitObj != null ->
                         "واریز ${unitObj.unitNumber} • ${unitObj.residentName}"
                     tx.type == TransactionType.DEPOSIT && tx.userNote.isNotBlank() ->
                         tx.userNote
                     tx.type == TransactionType.DEPOSIT ->
-                        "واریز به حساب ساختمان (واحد نامشخص - لمس کنید)"
+                        "واریز به حساب ساختمان (لمس کنید تا واحد مشخص شود)"
                     tx.userNote.isNotBlank() -> tx.userNote
                     tx.category.isNotBlank() -> tx.category
                     else -> "برداشت از حساب ساختمان"
@@ -177,13 +166,11 @@ fun SharjemanBuildingScreen(
                         title = mainTitle,
                         subtitle = "${tx.accountKey}${if (tx.category.isNotBlank()) " • ${tx.category}" else ""}",
                         unitBadge = if (unitObj != null) "${unitObj.unitNumber} - ${unitObj.residentName}" else "",
+                        payerAccountBadge = tx.payerIdentifier,
                         amount = tx.amount,
                         isDeposit = tx.type == TransactionType.DEPOSIT,
                         persianDate = tx.persianDate,
-                        persianDateOnly = tx.persianDateOnly,
                         timestampMillis = tx.timestampMillis,
-                        sourceTag = if (tx.isFromExcel) "اکسل بانک" else "پیامک بانکی",
-                        receiptPath = tx.receiptImagePath,
                         linkedSmsTx = tx
                     )
                 )
@@ -204,13 +191,11 @@ fun SharjemanBuildingScreen(
                     title = titleText,
                     subtitle = entry.category.ifBlank { if (isDep) "ثبت دستی واریز/بستانکاری" else "هزینه نقدی صندوق" },
                     unitBadge = if (unitObj != null) "${unitObj.unitNumber} - ${unitObj.residentName}" else "",
+                    payerAccountBadge = "",
                     amount = entry.amount,
                     isDeposit = isDep,
                     persianDate = entry.persianDate,
-                    persianDateOnly = entry.persianDate.substringBefore(" - "),
                     timestampMillis = entry.timestampMillis,
-                    sourceTag = "ثبت دستی",
-                    receiptPath = entry.receiptImagePath,
                     manualEntryId = entry.id
                 )
             )
@@ -228,6 +213,7 @@ fun SharjemanBuildingScreen(
                         item.title.contains(q, ignoreCase = true) ||
                         item.subtitle.contains(q, ignoreCase = true) ||
                         item.unitBadge.contains(q, ignoreCase = true) ||
+                        item.payerAccountBadge.contains(q, ignoreCase = true) ||
                         item.amount.toString().contains(q)
                 matchesType && matchesQuery
             }
@@ -238,14 +224,14 @@ fun SharjemanBuildingScreen(
         contentPadding = PaddingValues(bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // ۱. هدر آبی‌رنگ حرفه‌ای شارژمام با ۴ دکمه عملیاتی سریع (هزینه، درآمد، اعلام بدهی، بستانکاری)
+        // ۱. هدر اختصاصی «هم‌تراز ساختمان»
         item {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(
                         Brush.verticalGradient(
-                            listOf(Color(0xFF0D47A1), Color(0xFF1565C0))
+                            listOf(Color(0xFF091E3A), Color(0xFF00695C))
                         )
                     )
                     .padding(horizontal = 16.dp, vertical = 14.dp)
@@ -267,22 +253,26 @@ fun SharjemanBuildingScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "${units.size} واحد، $totalResidentsCount نفر",
+                                text = "${units.size} واحد • $totalResidentsCount نفر",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = Color(0xFFBBDEFB)
+                                color = Color(0xFFB2DFDB)
                             )
                         }
-                        IconButton(onClick = {
-                            editingUnit = null
-                            showAddUnitDialog = true
-                        }) {
-                            Icon(Icons.Rounded.AddHome, contentDescription = "افزودن واحد", tint = Color.White)
+                        Row {
+                            IconButton(onClick = { showBatchWizardDialog = true }) {
+                                Icon(Icons.Rounded.DomainAdd, contentDescription = "ساخت گروهی واحدها", tint = Color(0xFFFFD54F))
+                            }
+                            IconButton(onClick = {
+                                editingUnit = null
+                                showAddUnitDialog = true
+                            }) {
+                                Icon(Icons.Rounded.AddHome, contentDescription = "افزودن تک واحد", tint = Color.White)
+                            }
                         }
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    // ۴ دکمه عملیاتی سریع دقیقاً به سبک شارژمام
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly
@@ -324,7 +314,7 @@ fun SharjemanBuildingScreen(
             }
         }
 
-        // ۲. کارت‌های خلاصه وضعیت صندوق و بیلان واحدها (موجودی صندوق، بدهکار، بستانکار)
+        // ۲. کارت‌های تراز صندوق و بیلان واحدها
         item {
             Column(
                 modifier = Modifier.padding(horizontal = 16.dp),
@@ -346,16 +336,16 @@ fun SharjemanBuildingScreen(
                         Column {
                             Text("موجودی کل صندوق ساختمان", style = MaterialTheme.typography.labelMedium, color = Color.Gray)
                             Text(
-                                text = "بانک: ${formatCurrency(buildingBankBalance)} ریال",
+                                text = "حساب بانکی: ${formatCurrency(buildingBankBalance)} ریال",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF1565C0)
+                                color = Color(0xFF00796B)
                             )
                         }
                         Text(
                             text = "${formatCurrency(totalFundBalance)} ریال",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.ExtraBold,
-                            color = Color(0xFF0F2942)
+                            color = Color(0xFF091E3A)
                         )
                     }
                 }
@@ -386,7 +376,6 @@ fun SharjemanBuildingScreen(
                     }
                 }
 
-                // سوییچر بین «لیست واحدها و بیلان» و «گردش صندوق (واریزی‌ها با اسم واحد)»
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -409,7 +398,6 @@ fun SharjemanBuildingScreen(
             }
         }
 
-        // محتوای زیرتب ۱: کارت‌های واحدها با نمایش طبقه، متراژ، تعداد نفر، بیلان و دکمه جزئیات
         if (activeSubTab == 0) {
             if (unitSummaries.isEmpty()) {
                 item {
@@ -422,17 +410,33 @@ fun SharjemanBuildingScreen(
                     ) {
                         Column(
                             modifier = Modifier.padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(Icons.Rounded.DomainAdd, contentDescription = null, tint = Color(0xFF1565C0), modifier = Modifier.size(44.dp))
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text("هنوز واحدی تعریف نشده است", fontWeight = FontWeight.Bold)
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Button(onClick = {
-                                editingUnit = null
-                                showAddUnitDialog = true
-                            }) {
-                                Text("تعریف اولین واحد ساختمان")
+                            Icon(Icons.Rounded.DomainAdd, contentDescription = null, tint = Color(0xFF00796B), modifier = Modifier.size(48.dp))
+                            Text("راه‌اندازی سریع ساختمان", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                text = "نام ساختمان، تعداد واحدها و متراژ را وارد کنید تا تمام واحدها به‌صورت خودکار ساخته شوند و فقط نام مالک یا مستاجر را ثبت کنید:",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.Gray
+                            )
+                            Button(
+                                onClick = { showBatchWizardDialog = true },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00796B)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("ساخت گروهی و هوشمند واحدهای ساختمان")
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    editingUnit = null
+                                    showAddUnitDialog = true
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("افزودن تکی یک واحد")
                             }
                         }
                     }
@@ -454,9 +458,10 @@ fun SharjemanBuildingScreen(
 
                     val specsText = buildString {
                         append(summary.unit.roleType)
-                        if (summary.unit.floor.isNotBlank()) append("، ${summary.unit.floor}")
+                        if (summary.unit.floor.isNotBlank()) append("، طبقه ${summary.unit.floor}")
                         if (summary.unit.areaSqm > 0) append("، ${summary.unit.areaSqm} متر")
                         if (summary.unit.residentCount > 0) append("، ${summary.unit.residentCount} نفر")
+                        if (summary.unit.phoneNumber.isNotBlank()) append(" • ${summary.unit.phoneNumber}")
                     }
 
                     Card(
@@ -489,7 +494,7 @@ fun SharjemanBuildingScreen(
 
                                 Surface(
                                     modifier = Modifier.clickable { selectedUnitForDetail = summary },
-                                    color = Color(0xFF1565C0),
+                                    color = Color(0xFF091E3A),
                                     shape = RoundedCornerShape(8.dp)
                                 ) {
                                     Text(
@@ -531,7 +536,6 @@ fun SharjemanBuildingScreen(
                 }
             }
         } else {
-            // محتوای زیرتب ۲: گردش صندوق ساختمان با نمایش برجسته نام واحد در واریزی‌ها
             item {
                 Column(
                     modifier = Modifier
@@ -543,7 +547,7 @@ fun SharjemanBuildingScreen(
                         value = ledgerSearch,
                         onValueChange = { ledgerSearch = it },
                         modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text("جستجو بر اساس نام واحد، ساکن، عنوان یا مبلغ...", style = MaterialTheme.typography.bodySmall) },
+                        placeholder = { Text("جستجو در نام واحد، شماره کارت/حساب واریزکننده، عنوان یا مبلغ...", style = MaterialTheme.typography.bodySmall) },
                         leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
                         singleLine = true,
                         shape = RoundedCornerShape(12.dp)
@@ -551,7 +555,7 @@ fun SharjemanBuildingScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip(selected = ledgerTypeFilter == 0, onClick = { ledgerTypeFilter = 0 }, label = { Text("همه گردش‌ها") })
                         FilterChip(selected = ledgerTypeFilter == 1, onClick = { ledgerTypeFilter = 1 }, label = { Text("واریزی‌های واحدها") })
-                        FilterChip(selected = ledgerTypeFilter == 2, onClick = { ledgerTypeFilter = 2 }, label = { Text("هزینه‌ها و برداشت‌ها") })
+                        FilterChip(selected = ledgerTypeFilter == 2, onClick = { ledgerTypeFilter = 2 }, label = { Text("هزینه‌ها") })
                     }
                 }
             }
@@ -604,26 +608,38 @@ fun SharjemanBuildingScreen(
                                 )
                             }
 
-                            if (item.unitBadge.isNotEmpty() || item.manualEntryId != null) {
+                            // نمایش شماره حساب / کارت واریزکننده در صورت وجود + برچسب واحد
+                            if (item.unitBadge.isNotEmpty() || item.payerAccountBadge.isNotEmpty() || item.manualEntryId != null) {
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    if (item.unitBadge.isNotEmpty()) {
-                                        Surface(color = Color(0xFFE0F2F1), shape = RoundedCornerShape(6.dp)) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Icon(Icons.Rounded.MeetingRoom, contentDescription = null, tint = Color(0xFF00695C), modifier = Modifier.size(13.dp))
-                                                Spacer(modifier = Modifier.width(4.dp))
-                                                Text(item.unitBadge, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF004D40))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        if (item.unitBadge.isNotEmpty()) {
+                                            Surface(color = Color(0xFFE0F2F1), shape = RoundedCornerShape(6.dp)) {
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Icon(Icons.Rounded.MeetingRoom, contentDescription = null, tint = Color(0xFF00695C), modifier = Modifier.size(13.dp))
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Text(item.unitBadge, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF004D40))
+                                                }
                                             }
                                         }
-                                    } else {
-                                        Spacer(modifier = Modifier.width(1.dp))
+                                        if (item.payerAccountBadge.isNotEmpty()) {
+                                            Surface(color = Color(0xFFE3F2FD), shape = RoundedCornerShape(6.dp)) {
+                                                Text(
+                                                    text = "کارت/حساب واریزکننده: ${item.payerAccountBadge}",
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = Color(0xFF0D47A1),
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                            }
+                                        }
                                     }
 
                                     if (item.manualEntryId != null) {
@@ -643,9 +659,19 @@ fun SharjemanBuildingScreen(
         }
     }
 
-    // ========================================================================
-    // دیالوگ ۱: ثبت هزینه نقدی صندوق ساختمان
-    // ========================================================================
+    // ویزارد ساخت گروهی واحدهای ساختمان (نام ساختمان + تعداد واحد + متراژ واحدها -> تولید خودکار رکوردها)
+    if (showBatchWizardDialog) {
+        BatchCreateBuildingUnitsDialog(
+            initialBuildingName = buildingName,
+            onDismiss = { showBatchWizardDialog = false },
+            onConfirmBatch = { newBName, generatedUnits ->
+                onBatchCreateUnits(newBName, generatedUnits)
+                showBatchWizardDialog = false
+                Toast.makeText(context, "${generatedUnits.size} واحد برای «$newBName» ساخته شد", Toast.LENGTH_LONG).show()
+            }
+        )
+    }
+
     if (showExpenseDialog) {
         BuildingExpenseWithSplitDialog(
             units = units,
@@ -667,9 +693,6 @@ fun SharjemanBuildingScreen(
         )
     }
 
-    // ========================================================================
-    // دیالوگ ۲: ثبت درآمد صندوق ساختمان (موجودی اولیه، سود سپرده، اجاره مشاعات)
-    // ========================================================================
     if (showIncomeDialog) {
         ManualFundEntryDialog(
             isExpense = false,
@@ -683,9 +706,6 @@ fun SharjemanBuildingScreen(
         )
     }
 
-    // ========================================================================
-    // دیالوگ ۳: اعلام بدهی هوشمند (شارژ ماهانه مصوب، تقسیم مساوی، بر اساس متراژ، بر اساس نفرات)
-    // ========================================================================
     if (showDebtDialog) {
         DeclareBuildingDebtDialog(
             units = units,
@@ -698,9 +718,6 @@ fun SharjemanBuildingScreen(
         )
     }
 
-    // ========================================================================
-    // دیالوگ ۴: ثبت بستانکاری مستقیم برای یک یا چند واحد (الهام‌گرفته از شارژمام)
-    // ========================================================================
     if (showCreditDialog) {
         UnitCreditDialog(
             units = units,
@@ -713,7 +730,6 @@ fun SharjemanBuildingScreen(
         )
     }
 
-    // دیالوگ تعریف/ویرایش واحد
     if (showAddUnitDialog) {
         AddOrEditUnitDialog(
             existingUnit = editingUnit,
@@ -729,7 +745,6 @@ fun SharjemanBuildingScreen(
         )
     }
 
-    // دیالوگ تنظیمات نام ساختمان
     if (showBuildingSettingsDialog) {
         var bName by remember { mutableStateOf(buildingName) }
         AlertDialog(
@@ -740,7 +755,7 @@ fun SharjemanBuildingScreen(
                     OutlinedTextField(
                         value = bName,
                         onValueChange = { bName = it },
-                        label = { Text("نام ساختمان (مثلاً: ساختمان ۱۳۳)") },
+                        label = { Text("نام ساختمان (مثلاً: برج نگین / ساختمان ۱۳۳)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -780,7 +795,7 @@ fun SharjemanBuildingScreen(
         )
     }
 
-    // دیالوگ جزئیات یک واحد + اشتراک‌گذاری صورت‌حساب در پیامک/واتساپ
+    // دیالوگ جزئیات یک واحد + نمایش شماره حساب/کارت واریزکننده در هر واریزی
     selectedUnitForDetail?.let { summary ->
         val chargesForUnit = unitCharges.filter { it.unitId == summary.unit.id }
         val smsPaymentsForUnit = buildingTransactions.filter { it.unitId == summary.unit.id && it.type == TransactionType.DEPOSIT }
@@ -797,7 +812,7 @@ fun SharjemanBuildingScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         Text("${summary.unit.unitNumber} • ${summary.unit.residentName}", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            text = "${summary.unit.roleType} | ${summary.unit.floor} | ${summary.unit.areaSqm} متر | ${summary.unit.residentCount} نفر",
+                            text = "${summary.unit.roleType} | طبقه ${summary.unit.floor} | ${summary.unit.areaSqm} متر | ${summary.unit.phoneNumber}",
                             style = MaterialTheme.typography.labelSmall,
                             color = Color.Gray
                         )
@@ -827,7 +842,7 @@ fun SharjemanBuildingScreen(
                             selectedUnitForDetail = null
                             showAddUnitDialog = true
                         }) {
-                            Icon(Icons.Rounded.Edit, contentDescription = "ویرایش واحد", tint = Color(0xFF0F2942))
+                            Icon(Icons.Rounded.Edit, contentDescription = "ویرایش واحد", tint = Color(0xFF091E3A))
                         }
                     }
                 }
@@ -852,9 +867,18 @@ fun SharjemanBuildingScreen(
                         Text("واریزی‌های بانکی و بستانکاری‌های واحد:", style = MaterialTheme.typography.labelMedium, color = Color(0xFF00897B), fontWeight = FontWeight.Bold)
                     }
                     items(smsPaymentsForUnit) { pay ->
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("${pay.persianDate} (${pay.bankName})", style = MaterialTheme.typography.bodySmall)
-                            Text("+${formatCurrency(pay.amount)}", color = Color(0xFF00897B), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("${pay.persianDate} (${pay.bankName})", style = MaterialTheme.typography.bodySmall)
+                                Text("+${formatCurrency(pay.amount)}", color = Color(0xFF00897B), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                            }
+                            if (pay.payerIdentifier.isNotEmpty()) {
+                                Text(
+                                    text = "شماره حساب/کارت واریزکننده: ${pay.payerIdentifier}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF1565C0)
+                                )
+                            }
                         }
                     }
                     items(manualCreditsForUnit) { cr ->
@@ -870,6 +894,261 @@ fun SharjemanBuildingScreen(
             }
         )
     }
+}
+
+/**
+ * ویزارد ساخت گروهی واحدهای ساختمان:
+ * کاربر نام ساختمان، تعداد واحدها و متراژ (یکسان یا جداگانه) را وارد می‌کند و سیستم تمام واحدها را تولید می‌کند
+ * تا کاربر فقط نقش (مالک/مستاجر/خالی)، نام و شماره تماس (از دفترچه تلفن) را انتخاب کند.
+ */
+data class DraftUnitRow(
+    val unitNumber: String,
+    val floor: String,
+    val areaText: String,
+    val roleType: String,
+    val residentName: String,
+    val phoneNumber: String
+)
+
+@Composable
+fun BatchCreateBuildingUnitsDialog(
+    initialBuildingName: String,
+    onDismiss: () -> Unit,
+    onConfirmBatch: (String, List<BuildingUnitEntity>) -> Unit
+) {
+    val context = LocalContext.current
+    var step by remember { mutableIntStateOf(1) }
+    var bName by remember { mutableStateOf(initialBuildingName) }
+    var unitCountText by remember { mutableStateOf("6") }
+    var defaultAreaText by remember { mutableStateOf("120") }
+    var defaultChargeDigits by remember { mutableStateOf("2000000") }
+
+    var draftRows by remember { mutableStateOf<List<DraftUnitRow>>(emptyList()) }
+    var activeContactRowIndex by remember { mutableIntStateOf(-1) }
+
+    val contactPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickContact()
+    ) { contactUri ->
+        if (contactUri != null && activeContactRowIndex in draftRows.indices) {
+            val (cName, cPhone) = extractContactNameAndPhone(context, contactUri)
+            draftRows = draftRows.mapIndexed { idx, row ->
+                if (idx == activeContactRowIndex) {
+                    row.copy(
+                        residentName = row.residentName.ifBlank { cName },
+                        phoneNumber = cPhone.ifBlank { row.phoneNumber }
+                    )
+                } else row
+            }
+        }
+    }
+
+    val contactsPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            contactPickerLauncher.launch(null)
+        } else {
+            Toast.makeText(context, "مجوز دسترسی به مخاطبین برای انتخاب شماره لازم است", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = if (step == 1) "مرحله ۱: مشخصات کلی ساختمان" else "مرحله ۲: تکمیل مالک/مستاجر واحدها",
+                style = MaterialTheme.typography.titleMedium
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (step == 1) {
+                    OutlinedTextField(
+                        value = bName,
+                        onValueChange = { bName = it },
+                        label = { Text("نام ساختمان (مثلاً: مجتمع باران / ساختمان ۱۳۳)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = unitCountText,
+                        onValueChange = { unitCountText = it.filter { c -> c.isDigit() }.take(3) },
+                        label = { Text("تعداد کل واحدهای ساختمان") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = defaultAreaText,
+                        onValueChange = { defaultAreaText = it.filter { c -> c.isDigit() } },
+                        label = { Text("متراژ پیش‌فرض واحدها (متر مربع - قابل تغییر در مرحله بعد)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    RialAmountTextField(
+                        rawDigitsValue = defaultChargeDigits,
+                        onValueChange = { defaultChargeDigits = it },
+                        label = "مبلغ شارژ ماهانه پیش‌فرض هر واحد"
+                    )
+                } else {
+                    Text(
+                        text = "واحدها تولید شدند. برای هر واحد وضعیت (مالک/مستاجر)، متراژ، نام و شماره تماس را وارد یا از دفترچه تلفن انتخاب کنید:",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.Gray
+                    )
+                    draftRows.forEachIndexed { index, row ->
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(row.unitNumber, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium, color = Color(0xFF091E3A))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        listOf("مستاجر", "مالک", "خالی").forEach { rType ->
+                                            FilterChip(
+                                                selected = row.roleType == rType,
+                                                onClick = {
+                                                    draftRows = draftRows.mapIndexed { i, item ->
+                                                        if (i == index) item.copy(roleType = rType) else item
+                                                    }
+                                                },
+                                                label = { Text(rType, style = MaterialTheme.typography.labelSmall) }
+                                            )
+                                        }
+                                    }
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    OutlinedTextField(
+                                        value = row.residentName,
+                                        onValueChange = { txt ->
+                                            draftRows = draftRows.mapIndexed { i, item -> if (i == index) item.copy(residentName = txt) else item }
+                                        },
+                                        label = { Text("نام مالک/مستاجر", style = MaterialTheme.typography.labelSmall) },
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1.4f)
+                                    )
+                                    OutlinedTextField(
+                                        value = row.areaText,
+                                        onValueChange = { txt ->
+                                            draftRows = draftRows.mapIndexed { i, item -> if (i == index) item.copy(areaText = txt.filter { c -> c.isDigit() }) else item }
+                                        },
+                                        label = { Text("متراژ", style = MaterialTheme.typography.labelSmall) },
+                                        singleLine = true,
+                                        modifier = Modifier.weight(0.7f)
+                                    )
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    OutlinedTextField(
+                                        value = row.phoneNumber,
+                                        onValueChange = { txt ->
+                                            draftRows = draftRows.mapIndexed { i, item -> if (i == index) item.copy(phoneNumber = txt) else item }
+                                        },
+                                        label = { Text("شماره تلفن", style = MaterialTheme.typography.labelSmall) },
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    FilledTonalIconButton(
+                                        onClick = {
+                                            activeContactRowIndex = index
+                                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
+                                                contactPickerLauncher.launch(null)
+                                            } else {
+                                                contactsPermLauncher.launch(Manifest.permission.READ_CONTACTS)
+                                            }
+                                        }
+                                    ) {
+                                        Icon(Icons.Rounded.Contacts, contentDescription = "انتخاب از دفترچه تلفن", tint = Color(0xFF00796B))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (step == 1) {
+                Button(onClick = {
+                    val count = (unitCountText.toIntOrNull() ?: 0).coerceIn(1, 100)
+                    draftRows = (1..count).map { num ->
+                        DraftUnitRow(
+                            unitNumber = "واحد $num",
+                            floor = "$num",
+                            areaText = defaultAreaText,
+                            roleType = "مستاجر",
+                            residentName = "",
+                            phoneNumber = ""
+                        )
+                    }
+                    step = 2
+                }) { Text("تولید واحدها و مرحله بعد") }
+            } else {
+                Button(onClick = {
+                    val chargeVal = defaultChargeDigits.toLongOrNull() ?: 0L
+                    val entities = draftRows.map { row ->
+                        BuildingUnitEntity(
+                            unitNumber = row.unitNumber,
+                            residentName = row.residentName.trim().ifEmpty { row.roleType },
+                            monthlyCharge = chargeVal,
+                            phoneNumber = row.phoneNumber.trim(),
+                            floor = row.floor,
+                            areaSqm = row.areaText.toIntOrNull() ?: 0,
+                            residentCount = 1,
+                            roleType = row.roleType
+                        )
+                    }
+                    onConfirmBatch(bName.trim().ifEmpty { "ساختمان من" }, entities)
+                }) { Text("ثبت نهایی ${draftRows.size} واحد") }
+            }
+        },
+        dismissButton = {
+            if (step == 2) {
+                TextButton(onClick = { step = 1 }) { Text("مرحله قبل") }
+            } else {
+                TextButton(onClick = onDismiss) { Text("انصراف") }
+            }
+        }
+    )
+}
+
+fun extractContactNameAndPhone(context: Context, contactUri: Uri): Pair<String, String> {
+    var name = ""
+    var phone = ""
+    try {
+        context.contentResolver.query(contactUri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idIdx = cursor.getColumnIndex(ContactsContract.Contacts._ID)
+                val nameIdx = cursor.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME)
+                val hasPhoneIdx = cursor.getColumnIndex(ContactsContract.Contacts.HAS_PHONE_NUMBER)
+                if (nameIdx != -1) name = cursor.getString(nameIdx) ?: ""
+                val contactId = if (idIdx != -1) cursor.getString(idIdx) else null
+                val hasPhone = if (hasPhoneIdx != -1) cursor.getInt(hasPhoneIdx) > 0 else false
+
+                if (contactId != null && hasPhone) {
+                    context.contentResolver.query(
+                        ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                        arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
+                        "${ContactsContract.CommonDataKinds.Phone.CONTACT_ID} = ?",
+                        arrayOf(contactId),
+                        null
+                    )?.use { pCursor ->
+                        if (pCursor.moveToFirst()) {
+                            phone = pCursor.getString(0)?.replace(" ", "")?.replace("-", "") ?: ""
+                        }
+                    }
+                }
+            }
+        }
+    } catch (_: Exception) { }
+    return Pair(name, phone)
 }
 
 @Composable
@@ -906,7 +1185,7 @@ fun ManualFundEntryDialog(
 ) {
     val context = LocalContext.current
     var title by remember { mutableStateOf("") }
-    var amountText by remember { mutableStateOf("") }
+    var amountDigits by remember { mutableStateOf("") }
     var selectedCategory by remember { mutableStateOf(categories.firstOrNull() ?: "") }
     var note by remember { mutableStateOf("") }
     var receiptPath by remember { mutableStateOf("") }
@@ -923,11 +1202,6 @@ fun ManualFundEntryDialog(
         title = { Text(if (isExpense) "ثبت هزینه ساختمان" else "ثبت درآمد صندوق", style = MaterialTheme.typography.titleMedium) },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = if (isExpense) "مثال: قبض آب، نگهداری آسانسور، نظافت" else "مثال: موجودی اولیه صندوق، اجاره فضای مشاعات، سود سپرده",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.Gray
-                )
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
@@ -935,12 +1209,10 @@ fun ManualFundEntryDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                OutlinedTextField(
-                    value = amountText,
-                    onValueChange = { amountText = it.filter { c -> c.isDigit() } },
-                    label = { Text("مبلغ کل (ریال)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                RialAmountTextField(
+                    rawDigitsValue = amountDigits,
+                    onValueChange = { amountDigits = it },
+                    label = "مبلغ کل"
                 )
                 Text("برچسب / سرفصل:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -971,7 +1243,7 @@ fun ManualFundEntryDialog(
         },
         confirmButton = {
             Button(onClick = {
-                val amt = amountText.toLongOrNull() ?: 0L
+                val amt = amountDigits.toLongOrNull() ?: 0L
                 if (title.isNotBlank() && amt > 0L) {
                     val now = System.currentTimeMillis()
                     val pDate = PersianDate(now)
@@ -1003,8 +1275,8 @@ fun DeclareBuildingDebtDialog(
 ) {
     val currentMonthShamsi = remember { PersianDateFormat("Y/m").format(PersianDate()) }
     var title by remember { mutableStateOf("شارژ ماهانه $currentMonthShamsi") }
-    var splitMode by remember { mutableIntStateOf(0) } // 0: شارژ مصوب هر واحد، 1: تقسیم مساوی مبلغ کل، 2: تقسیم بر اساس متراژ، 3: تقسیم بر اساس تعداد نفرات
-    var totalAmountText by remember { mutableStateOf("") }
+    var splitMode by remember { mutableIntStateOf(0) }
+    var totalAmountDigits by remember { mutableStateOf("") }
     var selectedUnitIds by remember(units) { mutableStateOf(units.map { it.id }.toSet()) }
 
     AlertDialog(
@@ -1033,12 +1305,10 @@ fun DeclareBuildingDebtDialog(
                 }
 
                 if (splitMode != 0) {
-                    OutlinedTextField(
-                        value = totalAmountText,
-                        onValueChange = { totalAmountText = it.filter { c -> c.isDigit() } },
-                        label = { Text("مبلغ کل برای تقسیم (ریال)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                    RialAmountTextField(
+                        rawDigitsValue = totalAmountDigits,
+                        onValueChange = { totalAmountDigits = it },
+                        label = "مبلغ کل برای تقسیم"
                     )
                 }
 
@@ -1072,7 +1342,7 @@ fun DeclareBuildingDebtDialog(
                 val pDate = PersianDate(now)
                 val dateStr = PersianDateFormat("Y/m/d").format(pDate)
                 val monthStr = PersianDateFormat("Y/m").format(pDate)
-                val totalAmt = totalAmountText.toLongOrNull() ?: 0L
+                val totalAmt = totalAmountDigits.toLongOrNull() ?: 0L
 
                 val charges = when (splitMode) {
                     0 -> targetUnits.map { u ->
@@ -1114,7 +1384,7 @@ fun UnitCreditDialog(
     onConfirmCredits: (List<ManualBuildingEntryEntity>) -> Unit
 ) {
     var title by remember { mutableStateOf("") }
-    var amountPerUnitText by remember { mutableStateOf("") }
+    var amountPerUnitDigits by remember { mutableStateOf("") }
     var selectedUnitIds by remember { mutableStateOf<Set<Int>>(emptySet()) }
 
     AlertDialog(
@@ -1122,7 +1392,6 @@ fun UnitCreditDialog(
         title = { Text("ثبت بستانکاری برای واحدها", style = MaterialTheme.typography.titleMedium) },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("مثال: پرداخت نقدی شارژ، تسویه پیش‌پرداخت واحد ۱ و ۲", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
@@ -1130,12 +1399,10 @@ fun UnitCreditDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                OutlinedTextField(
-                    value = amountPerUnitText,
-                    onValueChange = { amountPerUnitText = it.filter { c -> c.isDigit() } },
-                    label = { Text("مبلغ برای هر واحد انتخاب‌شده (ریال)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                RialAmountTextField(
+                    rawDigitsValue = amountPerUnitDigits,
+                    onValueChange = { amountPerUnitDigits = it },
+                    label = "مبلغ برای هر واحد انتخاب‌شده"
                 )
                 Text("انتخاب واحدهای مشمول:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                 units.forEach { u ->
@@ -1156,7 +1423,7 @@ fun UnitCreditDialog(
         },
         confirmButton = {
             Button(onClick = {
-                val amt = amountPerUnitText.toLongOrNull() ?: 0L
+                val amt = amountPerUnitDigits.toLongOrNull() ?: 0L
                 if (amt > 0L && selectedUnitIds.isNotEmpty()) {
                     val now = System.currentTimeMillis()
                     val pDate = PersianDate(now)
@@ -1188,15 +1455,32 @@ fun AddOrEditUnitDialog(
     onSave: (BuildingUnitEntity) -> Unit,
     onDelete: (Int) -> Unit
 ) {
+    val context = LocalContext.current
     var unitNum by remember { mutableStateOf(existingUnit?.unitNumber ?: "") }
     var resident by remember { mutableStateOf(existingUnit?.residentName ?: "") }
-    var chargeText by remember { mutableStateOf(existingUnit?.monthlyCharge?.toString() ?: "") }
+    var chargeDigits by remember { mutableStateOf(existingUnit?.monthlyCharge?.toString() ?: "") }
     var floor by remember { mutableStateOf(existingUnit?.floor ?: "") }
     var areaText by remember { mutableStateOf(existingUnit?.areaSqm?.takeIf { it > 0 }?.toString() ?: "") }
     var countText by remember { mutableStateOf(existingUnit?.residentCount?.toString() ?: "1") }
-    var roleType by remember { mutableStateOf(existingUnit?.roleType ?: "ساکن") }
+    var roleType by remember { mutableStateOf(existingUnit?.roleType ?: "مستاجر") }
     var phone by remember { mutableStateOf(existingUnit?.phoneNumber ?: "") }
-    var openingText by remember { mutableStateOf(existingUnit?.openingBalance?.toString() ?: "0") }
+    var openingDigits by remember { mutableStateOf(existingUnit?.openingBalance?.toString() ?: "0") }
+
+    val contactPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickContact()
+    ) { contactUri ->
+        if (contactUri != null) {
+            val (cName, cPhone) = extractContactNameAndPhone(context, contactUri)
+            if (resident.isBlank() && cName.isNotBlank()) resident = cName
+            if (cPhone.isNotBlank()) phone = cPhone
+        }
+    }
+
+    val contactsPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) contactPickerLauncher.launch(null)
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1222,12 +1506,12 @@ fun AddOrEditUnitDialog(
                 OutlinedTextField(
                     value = resident,
                     onValueChange = { resident = it },
-                    label = { Text("نام مالک یا ساکن") },
+                    label = { Text("نام مالک یا مستاجر") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("ساکن", "مالک", "واحد خالی").forEach { role ->
+                    listOf("مستاجر", "مالک", "واحد خالی").forEach { role ->
                         FilterChip(
                             selected = roleType == role,
                             onClick = { roleType = role },
@@ -1239,7 +1523,7 @@ fun AddOrEditUnitDialog(
                     OutlinedTextField(
                         value = floor,
                         onValueChange = { floor = it },
-                        label = { Text("طبقه (مثلاً: یک)") },
+                        label = { Text("طبقه") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -1258,42 +1542,52 @@ fun AddOrEditUnitDialog(
                         modifier = Modifier.weight(0.8f)
                     )
                 }
-                OutlinedTextField(
-                    value = chargeText,
-                    onValueChange = { chargeText = it.filter { c -> c.isDigit() } },
-                    label = { Text("مبلغ شارژ ماهانه مصوب (ریال)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                RialAmountTextField(
+                    rawDigitsValue = chargeDigits,
+                    onValueChange = { chargeDigits = it },
+                    label = "مبلغ شارژ ماهانه مصوب"
                 )
-                OutlinedTextField(
-                    value = openingText,
-                    onValueChange = { openingText = it.filter { c -> c.isDigit() || c == '-' } },
-                    label = { Text("مانده اولیه (منفی = بدهکار، مثبت = بستانکار)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                RialAmountTextField(
+                    rawDigitsValue = openingDigits,
+                    onValueChange = { openingDigits = it },
+                    label = "مانده اولیه (منفی = بدهکار، مثبت = بستانکار)",
+                    allowNegative = true
                 )
-                OutlinedTextField(
-                    value = phone,
-                    onValueChange = { phone = it },
-                    label = { Text("شماره موبایل (اختیاری)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = phone,
+                        onValueChange = { phone = it },
+                        label = { Text("شماره تلفن") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilledTonalIconButton(
+                        onClick = {
+                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
+                                contactPickerLauncher.launch(null)
+                            } else {
+                                contactsPermLauncher.launch(Manifest.permission.READ_CONTACTS)
+                            }
+                        }
+                    ) {
+                        Icon(Icons.Rounded.Contacts, contentDescription = "انتخاب از دفترچه تلفن", tint = Color(0xFF00796B))
+                    }
+                }
             }
         },
         confirmButton = {
             Button(onClick = {
                 val u = unitNum.trim()
-                val c = chargeText.toLongOrNull() ?: 0L
+                val c = chargeDigits.toLongOrNull() ?: 0L
                 if (u.isNotEmpty()) {
                     onSave(
                         BuildingUnitEntity(
                             id = existingUnit?.id ?: 0,
                             unitNumber = u,
-                            residentName = resident.trim().ifEmpty { "ساکن" },
+                            residentName = resident.trim().ifEmpty { roleType },
                             monthlyCharge = c,
                             phoneNumber = phone.trim(),
-                            openingBalance = openingText.toLongOrNull() ?: 0L,
+                            openingBalance = openingDigits.toLongOrNull() ?: 0L,
                             floor = floor.trim(),
                             areaSqm = areaText.toIntOrNull() ?: 0,
                             residentCount = countText.toIntOrNull() ?: 1,
@@ -1307,7 +1601,6 @@ fun AddOrEditUnitDialog(
     )
 }
 
-
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun BuildingExpenseWithSplitDialog(
@@ -1318,14 +1611,13 @@ fun BuildingExpenseWithSplitDialog(
 ) {
     val context = LocalContext.current
     var title by remember { mutableStateOf("") }
-    var amountText by remember { mutableStateOf("") }
+    var amountDigits by remember { mutableStateOf("") }
     var selectedCategory by remember { mutableStateOf(categories.firstOrNull() ?: "") }
     var note by remember { mutableStateOf("") }
     var receiptPath by remember { mutableStateOf("") }
 
-    // پرسش کلیدی از مدیر ساختمان: پرداخت از محل شارژ موجود یا تقسیم بین واحدها؟
     var shouldSplitAmongUnits by remember { mutableStateOf(false) }
-    var splitMode by remember { mutableIntStateOf(0) } // 0: مساوی، 1: بر اساس متراژ، 2: بر اساس تعداد نفرات
+    var splitMode by remember { mutableIntStateOf(0) }
     var selectedUnitIds by remember(units) { mutableStateOf(units.map { it.id }.toSet()) }
 
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -1347,22 +1639,19 @@ fun BuildingExpenseWithSplitDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                OutlinedTextField(
-                    value = amountText,
-                    onValueChange = { amountText = it.filter { c -> c.isDigit() } },
-                    label = { Text("مبلغ کل هزینه (ریال)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                RialAmountTextField(
+                    rawDigitsValue = amountDigits,
+                    onValueChange = { amountDigits = it },
+                    label = "مبلغ کل هزینه"
                 )
 
-                // انتخاب نحوه تامین هزینه (از محل شارژ یا تقسیم بین واحدها)
                 Surface(
                     color = Color(0xFFF0F4F8),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("نحوه محاسبه و تامین این هزینه:", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge, color = Color(0xFF0F2942))
+                        Text("نحوه محاسبه و تامین این هزینه:", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge, color = Color(0xFF091E3A))
 
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -1371,7 +1660,7 @@ fun BuildingExpenseWithSplitDialog(
                             RadioButton(selected = !shouldSplitAmongUnits, onClick = { shouldSplitAmongUnits = false })
                             Column {
                                 Text("از محل صندوق شارژ موجود", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
-                                Text("فقط از موجودی صندوق کسر می‌شود (واحدها بدهکار نمی‌شوند)", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                                Text("فقط از موجودی صندوق کسر می‌شود", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                             }
                         }
 
@@ -1382,39 +1671,33 @@ fun BuildingExpenseWithSplitDialog(
                             RadioButton(selected = shouldSplitAmongUnits, onClick = { shouldSplitAmongUnits = true })
                             Column {
                                 Text("تقسیم مبلغ بین واحدها (ثبت بدهکاری)", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = Color(0xFF00695C))
-                                Text("سهم هر واحد محاسبه و به بدهکاری واحدها اضافه می‌شود", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                                Text("سهم هر واحد محاسبه و به بدهکاری اضافه می‌شود", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                             }
                         }
 
-                        if (shouldSplitAmongUnits) {
-                            if (units.isEmpty()) {
-                                Text("ابتدا واحدهای ساختمان را تعریف کنید!", color = Color.Red, style = MaterialTheme.typography.labelSmall)
-                            } else {
-                                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                                Text("روش تقسیم بین واحدها:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    listOf("مساوی", "بر اساس متراژ", "تعداد نفرات").forEachIndexed { idx, label ->
-                                        FilterChip(
-                                            selected = splitMode == idx,
-                                            onClick = { splitMode = idx },
-                                            label = { Text(label, style = MaterialTheme.typography.labelSmall) }
-                                        )
-                                    }
+                        if (shouldSplitAmongUnits && units.isNotEmpty()) {
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                listOf("مساوی", "متراژ", "نفرات").forEachIndexed { idx, label ->
+                                    FilterChip(
+                                        selected = splitMode == idx,
+                                        onClick = { splitMode = idx },
+                                        label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+                                    )
                                 }
-                                Text("واحدهای مشمول (${selectedUnitIds.size} واحد):", style = MaterialTheme.typography.labelSmall)
-                                units.forEach { u ->
-                                    val checked = selectedUnitIds.contains(u.id)
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth().clickable {
-                                            selectedUnitIds = if (checked) selectedUnitIds - u.id else selectedUnitIds + u.id
-                                        },
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Checkbox(checked = checked, onCheckedChange = {
-                                            selectedUnitIds = if (checked) selectedUnitIds - u.id else selectedUnitIds + u.id
-                                        })
-                                        Text("${u.unitNumber} (${u.residentName})", style = MaterialTheme.typography.labelSmall)
-                                    }
+                            }
+                            units.forEach { u ->
+                                val checked = selectedUnitIds.contains(u.id)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable {
+                                        selectedUnitIds = if (checked) selectedUnitIds - u.id else selectedUnitIds + u.id
+                                    },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(checked = checked, onCheckedChange = {
+                                        selectedUnitIds = if (checked) selectedUnitIds - u.id else selectedUnitIds + u.id
+                                    })
+                                    Text("${u.unitNumber} (${u.residentName})", style = MaterialTheme.typography.labelSmall)
                                 }
                             }
                         }
@@ -1452,7 +1735,7 @@ fun BuildingExpenseWithSplitDialog(
         },
         confirmButton = {
             Button(onClick = {
-                val amt = amountText.toLongOrNull() ?: 0L
+                val amt = amountDigits.toLongOrNull() ?: 0L
                 val cleanTitle = title.trim()
                 if (cleanTitle.isNotEmpty() && amt > 0L) {
                     val now = System.currentTimeMillis()

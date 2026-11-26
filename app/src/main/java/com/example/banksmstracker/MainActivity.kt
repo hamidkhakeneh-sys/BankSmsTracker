@@ -105,13 +105,22 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxSize(),
                         color = MaterialTheme.colorScheme.background
                     ) {
-                        HolooSmsAccountingApp(
-                            openDialogForSmsId = notificationSmsId,
-                            onDialogOpenedFromNotification = { notificationSmsId = null },
-                            fontScale = fontScale,
-                            onFontScaleLoaded = { fontScale = it },
-                            onFontScaleChanged = { fontScale = it }
-                        )
+                        var unlockedDbPassphrase by remember { mutableStateOf<ByteArray?>(null) }
+
+                        if (unlockedDbPassphrase == null) {
+                            DatabaseAuthGateScreen(
+                                onUnlocked = { keyBytes -> unlockedDbPassphrase = keyBytes }
+                            )
+                        } else {
+                            HolooSmsAccountingApp(
+                                dbPassphrase = unlockedDbPassphrase!!,
+                                openDialogForSmsId = notificationSmsId,
+                                onDialogOpenedFromNotification = { notificationSmsId = null },
+                                fontScale = fontScale,
+                                onFontScaleLoaded = { fontScale = it },
+                                onFontScaleChanged = { fontScale = it }
+                            )
+                        }
                     }
                 }
             }
@@ -142,6 +151,7 @@ enum class ReportPeriodMode(val title: String) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HolooSmsAccountingApp(
+    dbPassphrase: ByteArray,
     openDialogForSmsId: String? = null,
     onDialogOpenedFromNotification: () -> Unit = {},
     fontScale: Float = 1.0f,
@@ -151,7 +161,7 @@ fun HolooSmsAccountingApp(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
-    val database = remember { AppDatabase.getDatabase(context) }
+    val database = remember { AppDatabase.getDatabase(context, dbPassphrase) }
     val appDao = remember { database.appDao() }
 
     val requiredPermissions = remember {
@@ -181,6 +191,7 @@ fun HolooSmsAccountingApp(
     var categories by remember { mutableStateOf<List<CategoryEntity>>(emptyList()) }
     var ignoredItems by remember { mutableStateOf<List<IgnoredItemEntity>>(emptyList()) }
     var payerMappings by remember { mutableStateOf<List<PayerUnitMappingEntity>>(emptyList()) }
+    var accountBankMappings by remember { mutableStateOf<List<AccountBankMappingEntity>>(emptyList()) }
     var buildingUnits by remember { mutableStateOf<List<BuildingUnitEntity>>(emptyList()) }
     var unitCharges by remember { mutableStateOf<List<UnitChargeEntity>>(emptyList()) }
     var manualBuildingEntries by remember { mutableStateOf<List<ManualBuildingEntryEntity>>(emptyList()) }
@@ -360,6 +371,10 @@ fun HolooSmsAccountingApp(
                 val ignoredIds = ignoredList.filter { !it.isSenderBlocked }.map { it.keyId }.toSet()
                 val blockedSenders = ignoredList.filter { it.isSenderBlocked }.map { it.keyId }.toSet()
 
+                val bankMappingsList = appDao.getAllAccountBankMappings()
+                accountBankMappings = bankMappingsList
+                val bankMappingsMap = bankMappingsList.associate { it.rawAccountNumber to it.bankName }
+
                 val mappingsList = appDao.getAllPayerMappings()
                 payerMappings = mappingsList
                 val mappingsMap = mappingsList.associateBy { it.payerIdentifier }
@@ -380,6 +395,7 @@ fun HolooSmsAccountingApp(
                     context = context,
                     savedNotes = savedNotesMap,
                     accountProfiles = existingProfilesMap,
+                    accountBankMappings = bankMappingsMap,
                     payerMappings = mappingsMap,
                     importedRecords = importedList,
                     ignoredSmsIds = ignoredIds,
@@ -458,8 +474,8 @@ fun HolooSmsAccountingApp(
                             }
                             Spacer(modifier = Modifier.width(10.dp))
                             Column {
-                                Text("حسابداری هوشمند و شارژمان", style = MaterialTheme.typography.titleMedium, color = Color.White)
-                                Text("مدیریت مالی شخصی و آپارتمان", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB2DFDB))
+                                Text("هم‌تراز", style = MaterialTheme.typography.titleMedium, color = Color.White)
+                                Text("حسابداری هوشمند شخصی و مدیریت مجتمع", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB2DFDB))
                             }
                         }
                     },
@@ -553,7 +569,7 @@ fun HolooSmsAccountingApp(
                         selected = bottomTabIndex == 2,
                         onClick = { bottomTabIndex = 2 },
                         icon = { Icon(Icons.Rounded.Domain, contentDescription = null) },
-                        label = { Text("شارژمان", style = MaterialTheme.typography.labelSmall) }
+                        label = { Text("ساختمان‌یار", style = MaterialTheme.typography.labelSmall) }
                     )
                     NavigationBarItem(
                         selected = bottomTabIndex == 3,
@@ -689,6 +705,15 @@ fun HolooSmsAccountingApp(
                                     }
                                 }
                             },
+                            onBatchCreateUnits = { newBName, newUnits ->
+                                buildingName = newBName
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.saveSetting(AppSettingEntity("building_name", newBName))
+                                    newUnits.forEach { u -> appDao.saveBuildingUnit(u) }
+                                    buildingUnits = appDao.getAllBuildingUnits()
+                                    if (autoMonthlyChargeEnabled) fullReloadFromSms()
+                                }
+                            },
                             onDeleteUnit = { unitId ->
                                 coroutineScope.launch(Dispatchers.IO) {
                                     appDao.deleteBuildingUnit(unitId)
@@ -742,6 +767,7 @@ fun HolooSmsAccountingApp(
                             discrepancies = scopedDiscrepancies,
                             customScopes = customScopes,
                             payerMappings = payerMappings,
+                            accountBankMappings = accountBankMappings,
                             ignoredItems = ignoredItems,
                             fontScale = fontScale,
                             chartViewMode = chartViewMode,
@@ -791,6 +817,27 @@ fun HolooSmsAccountingApp(
                                     appDao.deletePayerMapping(payerId)
                                 }
                             },
+                            onUpdatePayerMapping = { oldPayerId, updatedMapping ->
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    if (oldPayerId != updatedMapping.payerIdentifier) {
+                                        appDao.deletePayerMapping(oldPayerId)
+                                    }
+                                    appDao.savePayerMapping(updatedMapping)
+                                    fullReloadFromSms()
+                                }
+                            },
+                            onSaveAccountBankMapping = { rawAcc, selectedBank ->
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.saveAccountBankMapping(AccountBankMappingEntity(rawAcc, selectedBank))
+                                    fullReloadFromSms()
+                                }
+                            },
+                            onDeleteAccountBankMapping = { rawAcc ->
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.deleteAccountBankMapping(rawAcc)
+                                    fullReloadFromSms()
+                                }
+                            },
                             onRestoreIgnored = { keyId ->
                                 coroutineScope.launch(Dispatchers.IO) {
                                     appDao.removeIgnored(keyId)
@@ -809,6 +856,14 @@ fun HolooSmsAccountingApp(
                 categories = categories,
                 buildingUnits = buildingUnits,
                 onDismiss = { selectedTransaction = null },
+                onAssignAccountToBank = { rawAccKey, chosenBank ->
+                    selectedTransaction = null
+                    coroutineScope.launch(Dispatchers.IO) {
+                        appDao.saveAccountBankMapping(AccountBankMappingEntity(rawAccKey, chosenBank))
+                        fullReloadFromSms()
+                    }
+                    Toast.makeText(context, "شماره حساب به «$chosenBank» متصل شد و تمام پیامک‌های مرتبط به‌روز شدند", Toast.LENGTH_LONG).show()
+                },
                 onSplitBuildingExpense = { generatedCharges ->
                     coroutineScope.launch(Dispatchers.IO) {
                         appDao.insertUnitCharges(generatedCharges)
@@ -1482,6 +1537,7 @@ fun SettingsAndReconciliationScreen(
     discrepancies: List<AccountDiscrepancy>,
     customScopes: List<String>,
     payerMappings: List<PayerUnitMappingEntity>,
+    accountBankMappings: List<AccountBankMappingEntity>,
     ignoredItems: List<IgnoredItemEntity>,
     fontScale: Float,
     onFontScaleChange: (Float) -> Unit,
@@ -1491,6 +1547,9 @@ fun SettingsAndReconciliationScreen(
     onChangeAccountScope: (AccountProfileEntity, String) -> Unit,
     onImportStatementRecords: (List<ImportedRecordEntity>) -> Unit,
     onDeletePayerMapping: (String) -> Unit,
+    onUpdatePayerMapping: (String, PayerUnitMappingEntity) -> Unit,
+    onSaveAccountBankMapping: (String, String) -> Unit,
+    onDeleteAccountBankMapping: (String) -> Unit,
     onRestoreIgnored: (String) -> Unit
 ) {
     val context = LocalContext.current
@@ -1747,21 +1806,162 @@ fun SettingsAndReconciliationScreen(
             }
         }
 
-        if (payerMappings.isNotEmpty()) {
-            item {
-                Text("کارت‌های متصل‌شده به واحدهای ساختمان (${payerMappings.size})", style = MaterialTheme.typography.titleSmall, color = Color(0xFF0F2942))
+        // بخش شناسایی و اتصال شماره حساب‌های بدون نام بانک به بانک‌های ایران
+        item {
+            var targetAccountToLink by remember { mutableStateOf<String?>(null) }
+            val detectedUnmappedAccounts = remember(transactions) {
+                transactions
+                    .filter { it.bankName == "سایر بانک‌ها" && it.rawAccountNumber.isNotBlank() }
+                    .groupBy { it.rawAccountNumber }
+                    .map { (accNum, list) -> Triple(accNum, list.size, list.first().persianDate) }
             }
-            items(payerMappings) { mapItem ->
-                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
-                    Row(modifier = Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(mapItem.unitTitle, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
-                            Text("شماره کارت/حساب: ${mapItem.payerIdentifier}", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
-                        }
-                        IconButton(onClick = { onDeletePayerMapping(mapItem.payerIdentifier) }) {
-                            Icon(Icons.Rounded.DeleteOutline, contentDescription = null, tint = Color.Red)
+
+            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(16.dp)) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.Link, contentDescription = null, tint = Color(0xFF00796B))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("شماره حساب‌های بدون نام بانک (${detectedUnmappedAccounts.size})", style = MaterialTheme.typography.titleSmall)
+                    }
+                    Text(
+                        text = "شماره حساب‌های زیر در پیامک‌ها بدون نام بانک شناسایی شده‌اند؛ بانک مربوط به هرکدام را انتخاب کنید تا حساب اصلی و فرعی ۱، ۲ و... به‌طور خودکار ایجاد شوند:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray
+                    )
+
+                    if (detectedUnmappedAccounts.isEmpty()) {
+                        Text("تمام شماره حساب‌های پیامک‌ها به بانک‌های خود متصل هستند ✅", style = MaterialTheme.typography.labelSmall, color = Color(0xFF00796B))
+                    } else {
+                        detectedUnmappedAccounts.forEach { (accNum, txCount, lastDate) ->
+                            Surface(
+                                color = Color(0xFFFFF8E1),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(10.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("شماره حساب: $accNum", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall, color = Color(0xFF091E3A))
+                                        Text("$txCount پیامک شناسایی‌شده • آخرین: $lastDate", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
+                                    }
+                                    Button(
+                                        onClick = { targetAccountToLink = accNum },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00796B)),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                    ) {
+                                        Text("انتصاب به بانک", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+                            }
                         }
                     }
+
+                    if (accountBankMappings.isNotEmpty()) {
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                        Text("اتصال‌های ثبت‌شده:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        accountBankMappings.forEach { mapping ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("حساب: ${mapping.rawAccountNumber}", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+                                    Text("بانک: ${mapping.bankName}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF00796B))
+                                }
+                                IconButton(onClick = { onDeleteAccountBankMapping(mapping.rawAccountNumber) }, modifier = Modifier.size(28.dp)) {
+                                    Icon(Icons.Rounded.DeleteOutline, contentDescription = null, tint = Color.Red, modifier = Modifier.size(16.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            targetAccountToLink?.let { accToLink ->
+                AccountToBankPickerDialog(
+                    discoveredAccountNumbers = listOf(accToLink),
+                    initialAccount = accToLink,
+                    onDismiss = { targetAccountToLink = null },
+                    onConfirm = { accNum, bank ->
+                        onSaveAccountBankMapping(accNum, bank)
+                        targetAccountToLink = null
+                    }
+                )
+            }
+        }
+
+        // نمایش و ویرایش شماره کارت‌ها و حساب‌های متصل‌شده به واحدهای ساختمان
+        if (payerMappings.isNotEmpty()) {
+            item {
+                var editingPayer by remember { mutableStateOf<PayerUnitMappingEntity?>(null) }
+
+                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(16.dp)) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("کارت‌ها و حساب‌های متصل به واحدهای ساختمان (${payerMappings.size})", style = MaterialTheme.typography.titleSmall, color = Color(0xFF091E3A))
+                        payerMappings.forEach { mapItem ->
+                            HorizontalDivider(thickness = 0.5.dp)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(mapItem.unitTitle, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                                    Text("شماره کارت/حساب: ${mapItem.payerIdentifier}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF1565C0))
+                                }
+                                Row {
+                                    IconButton(onClick = { editingPayer = mapItem }, modifier = Modifier.size(32.dp)) {
+                                        Icon(Icons.Rounded.Edit, contentDescription = "ویرایش", tint = Color(0xFF091E3A), modifier = Modifier.size(18.dp))
+                                    }
+                                    IconButton(onClick = { onDeletePayerMapping(mapItem.payerIdentifier) }, modifier = Modifier.size(32.dp)) {
+                                        Icon(Icons.Rounded.DeleteOutline, contentDescription = "حذف", tint = Color.Red, modifier = Modifier.size(18.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                editingPayer?.let { targetMap ->
+                    var newPayerCard by remember { mutableStateOf(targetMap.payerIdentifier) }
+                    var newUnitTitle by remember { mutableStateOf(targetMap.unitTitle) }
+                    AlertDialog(
+                        onDismissRequest = { editingPayer = null },
+                        title = { Text("ویرایش اتصال کارت به واحد", style = MaterialTheme.typography.titleMedium) },
+                        text = {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(
+                                    value = newPayerCard,
+                                    onValueChange = { newPayerCard = it },
+                                    label = { Text("شماره کارت / حساب واریزکننده") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                OutlinedTextField(
+                                    value = newUnitTitle,
+                                    onValueChange = { newUnitTitle = it },
+                                    label = { Text("عنوان واحد متصل‌شده") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        },
+                        confirmButton = {
+                            Button(onClick = {
+                                if (newPayerCard.isNotBlank() && newUnitTitle.isNotBlank()) {
+                                    onUpdatePayerMapping(targetMap.payerIdentifier, PayerUnitMappingEntity(newPayerCard.trim(), targetMap.unitId, newUnitTitle.trim()))
+                                    editingPayer = null
+                                }
+                            }) { Text("ذخیره تغییرات") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { editingPayer = null }) { Text("انصراف") }
+                        }
+                    )
                 }
             }
         }
@@ -1953,6 +2153,7 @@ fun TransactionDetailDialog(
     categories: List<CategoryEntity>,
     buildingUnits: List<BuildingUnitEntity>,
     onDismiss: () -> Unit,
+    onAssignAccountToBank: (String, String) -> Unit = { _, _ -> },
     onSplitBuildingExpense: (List<UnitChargeEntity>) -> Unit = {},
     onSave: (String, String, Boolean?, Int?, Boolean, String) -> Unit,
     onMarkAsNotBankSms: (Boolean) -> Unit,
@@ -2045,8 +2246,85 @@ fun TransactionDetailDialog(
                 Text("تاریخ: ${transaction.persianDate}", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                 Spacer(modifier = Modifier.height(6.dp))
 
-                Surface(color = Color(0xFFF1F3F4), shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    Text(transaction.rawMessage, modifier = Modifier.padding(8.dp), style = MaterialTheme.typography.bodySmall)
+                Surface(
+                    color = Color(0xFFF1F3F4),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { openSmsInPhoneApp(context, transaction.id, transaction.sender) }
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(transaction.rawMessage, style = MaterialTheme.typography.bodySmall)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Rounded.OpenInNew, contentDescription = null, tint = Color(0xFF1565C0), modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "مشاهده اصل پیامک در برنامه پیامک گوشی",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF1565C0)
+                            )
+                        }
+                    }
+                }
+
+                // کارت اتصال سریع شماره حساب پیامک به یکی از بانک‌های ایران (مخصوص پیامک‌های بدون نام بانک)
+                if (transaction.rawAccountNumber.isNotBlank() || transaction.bankName == "سایر بانک‌ها") {
+                    var showInlineBankPicker by remember { mutableStateOf(false) }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Surface(
+                        color = if (transaction.bankName == "سایر بانک‌ها") Color(0xFFE3F2FD) else Color(0xFFF5F7FA),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = if (transaction.rawAccountNumber.isNotBlank()) "شماره حساب: ${transaction.rawAccountNumber}" else "بانک شناسایی‌نشده",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF0D47A1)
+                                    )
+                                    Text(
+                                        text = "بانک فعلی: ${transaction.bankName}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.DarkGray
+                                    )
+                                }
+                                Button(
+                                    onClick = { showInlineBankPicker = true },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1565C0))
+                                ) {
+                                    Icon(Icons.Rounded.AccountBalance, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("تعیین بانک", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+
+                    if (showInlineBankPicker) {
+                        AccountToBankPickerDialog(
+                            discoveredAccountNumbers = listOfNotNull(transaction.rawAccountNumber.takeIf { it.isNotBlank() }),
+                            initialAccount = transaction.rawAccountNumber,
+                            onDismiss = { showInlineBankPicker = false },
+                            onConfirm = { accNum, chosenBank ->
+                                showInlineBankPicker = false
+                                onAssignAccountToBank(accNum, chosenBank)
+                            }
+                        )
+                    }
                 }
 
                 if (transaction.scope == "مدیریت ساختمان" && transaction.type == TransactionType.DEPOSIT && buildingUnits.isNotEmpty()) {
@@ -2460,6 +2738,248 @@ fun PermissionRequestView(onRequestPermission: () -> Unit) {
         Spacer(modifier = Modifier.height(24.dp))
         Button(onClick = onRequestPermission, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F2942))) {
             Text("اعطای مجوزهای مورد نیاز")
+        }
+    }
+}
+
+
+@Composable
+fun AccountToBankPickerDialog(
+    discoveredAccountNumbers: List<String>,
+    initialAccount: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String, String) -> Unit
+) {
+    var accountInput by remember { mutableStateOf(initialAccount) }
+    var bankSearchQuery by remember { mutableStateOf("") }
+    var selectedBank by remember { mutableStateOf(IranBankSmsParser.ALL_IRANIAN_BANKS.first()) }
+
+    val filteredBanks = remember(bankSearchQuery) {
+        val q = IranBankSmsParser.normalizePersian(bankSearchQuery.trim())
+        if (q.isEmpty()) IranBankSmsParser.ALL_IRANIAN_BANKS
+        else IranBankSmsParser.ALL_IRANIAN_BANKS.filter {
+            IranBankSmsParser.normalizePersian(it).contains(q, ignoreCase = true)
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("اتصال شماره حساب به بانک", style = MaterialTheme.typography.titleMedium) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "با اتصال این شماره حساب به بانک، تمام پیامک‌های قبلی و بعدی دارای این شماره حساب به‌صورت خودکار زیرمجموعه آن بانک ثبت می‌شوند:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.Gray
+                )
+
+                OutlinedTextField(
+                    value = accountInput,
+                    onValueChange = { accountInput = it },
+                    label = { Text("شماره حساب موجود در پیامک") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                if (discoveredAccountNumbers.size > 1) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(discoveredAccountNumbers) { acc ->
+                            FilterChip(
+                                selected = accountInput == acc,
+                                onClick = { accountInput = acc },
+                                label = { Text(acc, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = bankSearchQuery,
+                    onValueChange = { bankSearchQuery = it },
+                    placeholder = { Text("جستجو در بین تمام بانک‌های ایران...", style = MaterialTheme.typography.bodySmall) },
+                    leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                LazyColumn(modifier = Modifier.heightIn(max = 220.dp)) {
+                    items(filteredBanks) { bank ->
+                        val isSel = selectedBank == bank
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isSel) Color(0xFFE0F2F1) else Color.Transparent)
+                                .clickable { selectedBank = bank }
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = bank,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSel) Color(0xFF00695C) else Color(0xFF1C2434)
+                            )
+                            if (isSel) {
+                                Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = Color(0xFF00796B), modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val cleanAcc = accountInput.trim()
+                    if (cleanAcc.isNotEmpty()) {
+                        onConfirm(cleanAcc, selectedBank)
+                    }
+                }
+            ) { Text("اتصال و دسته‌بندی خودکار") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("انصراف") }
+        }
+    )
+}
+
+
+@Composable
+fun DatabaseAuthGateScreen(
+    onUnlocked: (ByteArray) -> Unit
+) {
+    val context = LocalContext.current
+    val isConfigured = remember { DatabaseSecurityManager.isCredentialsConfigured(context) }
+    var username by remember { mutableStateOf(DatabaseSecurityManager.getSavedUsername(context)) }
+    var password by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
+    var errorMessage by remember { mutableStateOf("") }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(Color(0xFF071930), Color(0xFF0F2942), Color(0xFF004D40))
+                )
+            )
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Card(
+            shape = RoundedCornerShape(22.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(22.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Surface(
+                    color = Color(0xFF091E3A),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.size(62.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(Icons.Rounded.LockPerson, contentDescription = null, tint = Color(0xFFFFB300), modifier = Modifier.size(34.dp))
+                    }
+                }
+
+                Text(
+                    text = "هم‌تراز • گاوصندوق مالی رمزنگاری‌شده",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color(0xFF091E3A)
+                )
+
+                Text(
+                    text = if (isConfigured) {
+                        "برای رمزگشایی دیتابیس و دسترسی به اسناد مالی و حساب ساختمان، نام کاربری و رمز عبور خود را وارد کنید:"
+                    } else {
+                        "برای محافظت کامل از دیتابیس مالی (رمزنگاری SQLCipher)، یک نام کاربری و رمز عبور اختصاصی تعیین کنید:"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.Gray
+                )
+
+                OutlinedTextField(
+                    value = username,
+                    onValueChange = { username = it; errorMessage = "" },
+                    label = { Text("نام کاربری") },
+                    leadingIcon = { Icon(Icons.Rounded.Person, contentDescription = null) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it; errorMessage = "" },
+                    label = { Text("رمز عبور") },
+                    leadingIcon = { Icon(Icons.Rounded.Key, contentDescription = null) },
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                if (!isConfigured) {
+                    OutlinedTextField(
+                        value = confirmPassword,
+                        onValueChange = { confirmPassword = it; errorMessage = "" },
+                        label = { Text("تکرار رمز عبور") },
+                        leadingIcon = { Icon(Icons.Rounded.VerifiedUser, contentDescription = null) },
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                if (errorMessage.isNotEmpty()) {
+                    Text(
+                        text = errorMessage,
+                        color = Color(0xFFC62828),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Button(
+                    onClick = {
+                        if (username.isBlank() || password.length < 4) {
+                            errorMessage = "نام کاربری را وارد کنید (رمز عبور حداقل ۴ کاراکتر)"
+                            return@Button
+                        }
+                        if (!isConfigured) {
+                            if (password != confirmPassword) {
+                                errorMessage = "رمز عبور و تکرار آن یکسان نیستند"
+                                return@Button
+                            }
+                            val key = DatabaseSecurityManager.setupCredentials(context, username, password)
+                            onUnlocked(key)
+                        } else {
+                            val key = DatabaseSecurityManager.verifyAndDeriveKey(context, username, password)
+                            if (key != null) {
+                                onUnlocked(key)
+                            } else {
+                                errorMessage = "نام کاربری یا رمز عبور اشتباه است!"
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00796B))
+                ) {
+                    Icon(Icons.Rounded.LockOpen, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (isConfigured) "ورود و رمزگشایی دیتابیس" else "ایجاد رمزنگاری و ورود به برنامه",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
         }
     }
 }

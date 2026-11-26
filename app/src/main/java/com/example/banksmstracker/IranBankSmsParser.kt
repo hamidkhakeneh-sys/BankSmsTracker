@@ -19,6 +19,7 @@ data class BankTransaction(
     val id: String,
     val sender: String,
     val bankName: String,
+    val rawAccountNumber: String = "", // شماره حساب کامل و خام موجود در پیامک (مثلاً 361970003195155001)
     val accountNumber: String,
     val accountKey: String,
     val scope: String,
@@ -102,9 +103,43 @@ object IranBankSmsParser {
         """(?:حساب|کارت|ش\.حساب|شماره حساب)\s*[:=\-*]?\s*([\d*.\-]*\d[\d*.\-]{2,20})"""
     )
 
-    // استخراج شماره حساب بدون برچسب در ابتدای خط (مثل 361970003195155001 در پیامک‌های کوتاه بانک مهر ایران)
+    // لیست جامع تمام بانک‌ها و موسسات اعتباری رسمی ایران برای انتخاب کاربر
+    val ALL_IRANIAN_BANKS = listOf(
+        "بانک ملی ایران",
+        "بانک ملت",
+        "بانک تجارت",
+        "بانک صادرات ایران",
+        "بانک سپه",
+        "بانک کشاورزی",
+        "بانک مسکن",
+        "بانک رفاه کارگران",
+        "بانک قرض‌الحسنه مهر ایران",
+        "بانک قرض‌الحسنه رسالت",
+        "بانک سامان",
+        "بانک پاسارگاد",
+        "بانک پارسیان",
+        "بانک اقتصاد نوین",
+        "بانک شهر",
+        "بانک آینده",
+        "بانک سینا",
+        "بانک کارآفرین",
+        "بانک دی",
+        "بانک سرمایه",
+        "بانک گردشگری",
+        "بانک ایران زمین",
+        "بانک خاورمیانه",
+        "بانک توسعه تعاون",
+        "بانک صنعت و معدن",
+        "بانک توسعه صادرات",
+        "پست بانک ایران",
+        "بلوبانک (سامان)",
+        "ویپاد (پاسارگاد)",
+        "موسسه اعتباری ملل"
+    )
+
+    // استخراج شماره حساب بدون برچسب (مثلاً 361970003195155001 در سطر اول یا هر سطر مستقل پیامک)
     private val standaloneAccountRegex = Regex(
-        """(?m)^\s*(\d[\d\-]{11,21})\s*$"""
+        """(?m)^\s*(\d[\d.\-]{8,23})\s*$"""
     )
 
     private val payerCardOrAccRegex = Regex(
@@ -133,12 +168,10 @@ object IranBankSmsParser {
         val balanceAmount = balanceMatch.groupValues[1].replace(",", "").toLongOrNull()
 
         val accMatch = labeledAccountRegex.find(body) ?: standaloneAccountRegex.find(body)
-        val rawAcc = accMatch?.groupValues?.get(1)?.trim() ?: "اصلی"
-        // استخراج هسته یکتای شماره حساب (حذف خط تیره و نقطه برای یکسان‌سازی فرمت‌های مختلف یک حساب، مثل 3608-700-3195155-1 و 361970003195155001)
+        val rawAcc = accMatch?.groupValues?.get(1)?.trim() ?: ""
         val digitsOnlyAcc = rawAcc.replace(Regex("""[^\d]"""), "")
         val cleanAcc = when {
             digitsOnlyAcc.length >= 10 -> {
-                // شماره حساب‌های طولانی بانکی (مثل مهر ایران 360870031951551 یا 361970003195155001): بخش میانی/اصلی شماره مشتری را استخراج کن
                 val core = if (digitsOnlyAcc.length >= 15) digitsOnlyAcc.drop(7).take(7) else digitsOnlyAcc.takeLast(7)
                 core.ifEmpty { digitsOnlyAcc.takeLast(6) }
             }
@@ -195,6 +228,7 @@ object IranBankSmsParser {
             id = id,
             sender = sender,
             bankName = bankName,
+            rawAccountNumber = rawAcc.ifEmpty { if (cleanAcc != "اصلی") cleanAcc else "" },
             accountNumber = cleanAcc,
             accountKey = accountKey,
             scope = "شخصی",
@@ -358,6 +392,7 @@ fun readAllTransactionsFast(
     context: Context,
     savedNotes: Map<String, TransactionNoteEntity>,
     accountProfiles: Map<String, AccountProfileEntity>,
+    accountBankMappings: Map<String, String>,
     payerMappings: Map<String, PayerUnitMappingEntity>,
     importedRecords: List<ImportedRecordEntity>,
     ignoredSmsIds: Set<String>,
@@ -392,7 +427,17 @@ fun readAllTransactionsFast(
             if (ignoredSmsIds.contains(id)) continue
             if (blockedSenders.contains(sender)) continue
 
-            IranBankSmsParser.parseSms(id, sender, body, dateMillis)?.let { tx ->
+            IranBankSmsParser.parseSms(id, sender, body, dateMillis)?.let { parsedTx ->
+                // اعمال نگاشت دستی شماره حساب به بانک (در صورتی که کاربر قبلاً این شماره حساب را به بانکی متصل کرده باشد)
+                val mappedBank = accountBankMappings[parsedTx.rawAccountNumber]
+                    ?: accountBankMappings[parsedTx.accountNumber]
+                val tx = if (mappedBank != null) {
+                    val newKey = "$mappedBank - ${parsedTx.accountNumber}"
+                    parsedTx.copy(bankName = mappedBank, accountKey = newKey)
+                } else {
+                    parsedTx
+                }
+
                 val profile = discoveredAccounts.getOrPut(tx.accountKey) {
                     AccountProfileEntity(
                         accountKey = tx.accountKey,
@@ -425,8 +470,7 @@ fun readAllTransactionsFast(
         }
     }
 
-    // نگاشت هوشمند شماره حساب‌های بدون عنوان بانک به نام بانک شناخته‌شده در سایر پیامک‌ها
-    // (مثلاً اگر در یک پیامک بانک مهر ایران نام بانک بود و در پیامک بعدی فقط شماره حساب 3195155 آمد، هر دو یکپارچه شوند)
+    // ۱. نگاشت هوشمند شماره حساب‌های بدون عنوان بانک به نام بانک شناخته‌شده در سایر پیامک‌ها
     val knownBankByAccountNum = rawTransactions
         .filter { it.bankName != "سایر بانک‌ها" && it.accountNumber != "اصلی" }
         .associate { it.accountNumber to it.bankName }
@@ -437,22 +481,60 @@ fun readAllTransactionsFast(
             val resolvedBank = knownBankByAccountNum[tx.accountNumber]
             if (resolvedBank != null) {
                 val fixedAccountKey = "$resolvedBank - ${tx.accountNumber}"
-                val profile = discoveredAccounts.getOrPut(fixedAccountKey) {
-                    AccountProfileEntity(
-                        accountKey = fixedAccountKey,
-                        bankName = resolvedBank,
-                        accountNumber = tx.accountNumber,
-                        customTitle = fixedAccountKey,
-                        scope = tx.scope
-                    )
-                }
                 rawTransactions[i] = tx.copy(
                     bankName = resolvedBank,
-                    accountKey = fixedAccountKey,
-                    scope = profile.scope
+                    accountKey = fixedAccountKey
                 )
             }
         }
+    }
+
+    // ۲. نام‌گذاری خودکار چند حساب در یک بانک به صورت «اصلی»، «فرعی ۱»، «فرعی ۲» بر اساس بیشترین تعداد تراکنش
+    val accountsGroupedByBank = rawTransactions.groupBy { it.bankName }
+    val renamedAccountKeyMap = mutableMapOf<String, String>()
+
+    for ((bName, txListOfBank) in accountsGroupedByBank) {
+        val distinctAccsSortedByActivity = txListOfBank
+            .groupBy { it.accountNumber }
+            .toList()
+            .sortedByDescending { it.second.size } // پرگردش‌ترین حساب = اصلی
+
+        if (distinctAccsSortedByActivity.size == 1) {
+            val (accNum, _) = distinctAccsSortedByActivity[0]
+            val oldKey = "$bName - $accNum"
+            val newKey = if (accNum == "اصلی") "$bName - اصلی" else "$bName - اصلی ($accNum)"
+            renamedAccountKeyMap[oldKey] = newKey
+        } else {
+            distinctAccsSortedByActivity.forEachIndexed { idx, (accNum, _) ->
+                val oldKey = "$bName - $accNum"
+                val roleLabel = if (idx == 0) "اصلی" else "فرعی $idx"
+                val newKey = if (accNum == "اصلی") "$bName - $roleLabel" else "$bName - $roleLabel ($accNum)"
+                renamedAccountKeyMap[oldKey] = newKey
+            }
+        }
+    }
+
+    discoveredAccounts.clear()
+    for (i in rawTransactions.indices) {
+        val tx = rawTransactions[i]
+        val finalKey = renamedAccountKeyMap[tx.accountKey] ?: tx.accountKey
+        // حفظ تنظیمات قبلی کاربر (مثل اختصاص به مدیریت ساختمان) حتی اگر پسوند حساب به «اصلی / فرعی ۱» تغییر کرده باشد
+        val existingProf = accountProfiles[finalKey]
+            ?: accountProfiles.values.find { it.bankName == tx.bankName && it.accountNumber == tx.accountNumber }
+            ?: AccountProfileEntity(
+                accountKey = finalKey,
+                bankName = tx.bankName,
+                accountNumber = tx.accountNumber,
+                customTitle = finalKey,
+                scope = tx.scope
+            )
+        val syncedProfile = existingProf.copy(accountKey = finalKey, customTitle = finalKey)
+        discoveredAccounts[finalKey] = syncedProfile
+
+        rawTransactions[i] = tx.copy(
+            accountKey = finalKey,
+            scope = syncedProfile.scope
+        )
     }
 
     for (imp in importedRecords) {

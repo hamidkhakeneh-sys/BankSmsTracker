@@ -11,7 +11,7 @@ android {
 
     defaultConfig {
         applicationId = "com.example.banksmstracker"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 35
         versionCode = 5
         versionName = "5.0"
@@ -36,6 +36,14 @@ android {
     buildFeatures {
         compose = true
     }
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "META-INF/DEPENDENCIES"
+            excludes += "META-INF/LICENSE*"
+            excludes += "META-INF/NOTICE*"
+        }
+    }
 }
 
 dependencies {
@@ -55,7 +63,6 @@ dependencies {
     ksp("androidx.room:room-compiler:$roomVersion")
 
     implementation("com.github.samanzamani:PersianDate:1.7.1")
-    // Apache POI برای خواندن مستقیم فایل‌های اکسل (.xls و .xlsx) همراه با پشتیبانی از CSV و PDF
     implementation("org.apache.poi:poi:5.2.5")
     implementation("org.apache.poi:poi-ooxml:5.2.5")
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")

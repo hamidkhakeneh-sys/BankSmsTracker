@@ -887,7 +887,7 @@ fun HolooSmsAccountingApp(
                                 coroutineScope.launch(Dispatchers.IO) {
                                     appDao.saveAccountBankMapping(AccountBankMappingEntity(rawAcc, selectedBank))
                                     if (coreDigits.isNotEmpty() && coreDigits != rawAcc) {
-                                        appDao.saveAccountBankMapping(AccountBankMappingEntity(coreDigits, chosenBank = selectedBank))
+                                        appDao.saveAccountBankMapping(AccountBankMappingEntity(coreDigits, bankName = selectedBank))
                                     }
                                     recomputedProfiles.forEach { appDao.saveAccountProfile(it) }
                                 }

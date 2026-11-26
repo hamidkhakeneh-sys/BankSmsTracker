@@ -26,7 +26,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -34,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
@@ -53,15 +54,34 @@ class MainActivity : ComponentActivity() {
         notificationSmsId = intent?.getStringExtra(BackgroundSmsReceiver.EXTRA_SMS_ID)
 
         setContent {
-            MaterialTheme {
+            var fontScale by remember { mutableFloatStateOf(1.0f) }
+
+            val dynamicTypography = remember(fontScale) {
+                Typography(
+                    titleLarge = TextStyle(fontSize = (20 * fontScale).sp, fontWeight = FontWeight.Bold),
+                    titleMedium = TextStyle(fontSize = (16 * fontScale).sp, fontWeight = FontWeight.Bold),
+                    titleSmall = TextStyle(fontSize = (14 * fontScale).sp, fontWeight = FontWeight.SemiBold),
+                    bodyLarge = TextStyle(fontSize = (15 * fontScale).sp),
+                    bodyMedium = TextStyle(fontSize = (13 * fontScale).sp),
+                    bodySmall = TextStyle(fontSize = (12 * fontScale).sp),
+                    labelLarge = TextStyle(fontSize = (13 * fontScale).sp, fontWeight = FontWeight.Medium),
+                    labelMedium = TextStyle(fontSize = (11 * fontScale).sp),
+                    labelSmall = TextStyle(fontSize = (10 * fontScale).sp)
+                )
+            }
+
+            MaterialTheme(typography = dynamicTypography) {
                 CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
                     Surface(
                         modifier = Modifier.fillMaxSize(),
-                        color = Color(0xFFF4F6F9)
+                        color = Color(0xFFF3F5F9)
                     ) {
                         HolooSmsAccountingApp(
                             openDialogForSmsId = notificationSmsId,
-                            onDialogOpenedFromNotification = { notificationSmsId = null }
+                            onDialogOpenedFromNotification = { notificationSmsId = null },
+                            fontScale = fontScale,
+                            onFontScaleLoaded = { fontScale = it },
+                            onFontScaleChanged = { fontScale = it }
                         )
                     }
                 }
@@ -76,12 +96,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-enum class ScopeTab(val code: String, val title: String) {
-    ALL("ALL", "کل حساب‌ها"),
-    PERSONAL("PERSONAL", "حساب شخصی"),
-    BUILDING("BUILDING", "مدیریت ساختمان")
-}
-
 enum class TypeFilter(val title: String) {
     ALL("همه"),
     DEPOSIT("واریز"),
@@ -89,11 +103,21 @@ enum class TypeFilter(val title: String) {
     INTERNAL("انتقال داخلی")
 }
 
+enum class ReportPeriodMode(val title: String) {
+    ALL("کل دوره"),
+    YEARLY("سالانه"),
+    MONTHLY("ماهانه (ماه خاص)"),
+    CUSTOM_RANGE("تاریخ تا تاریخ")
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HolooSmsAccountingApp(
     openDialogForSmsId: String? = null,
-    onDialogOpenedFromNotification: () -> Unit = {}
+    onDialogOpenedFromNotification: () -> Unit = {},
+    fontScale: Float = 1.0f,
+    onFontScaleLoaded: (Float) -> Unit = {},
+    onFontScaleChanged: (Float) -> Unit = {}
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -123,65 +147,56 @@ fun HolooSmsAccountingApp(
         )
     }
 
-    // داده‌های اصلی برنامه
     var allTransactions by remember { mutableStateOf<List<BankTransaction>>(emptyList()) }
     var accountProfiles by remember { mutableStateOf<List<AccountProfileEntity>>(emptyList()) }
     var categories by remember { mutableStateOf<List<CategoryEntity>>(emptyList()) }
     var ignoredItems by remember { mutableStateOf<List<IgnoredItemEntity>>(emptyList()) }
-    var discrepancies by remember { mutableStateOf<List<AccountDiscrepancy>>(emptyList()) }
+    var payerMappings by remember { mutableStateOf<List<PayerUnitMappingEntity>>(emptyList()) }
+    var customScopes by remember { mutableStateOf<List<String>>(listOf("شخصی", "مدیریت ساختمان")) }
 
     var isLoading by remember { mutableStateOf(false) }
 
-    // ناوبری تب‌های پایین (سبک نرم‌افزار حسابداری)
-    var bottomTabIndex by remember { mutableIntStateOf(0) } // 0: داشبورد، 1: دفتر روزنامه، 2: حساب‌ها و مغایرت، 3: گزارشات
-    var selectedScope by remember { mutableStateOf(ScopeTab.ALL) }
+    var bottomTabIndex by remember { mutableIntStateOf(0) }
+    var selectedScope by remember { mutableStateOf("همه صندوق‌ها") }
 
-    // دیالوگ‌ها
     var selectedTransaction by remember { mutableStateOf<BankTransaction?>(null) }
     var showCategoryManager by remember { mutableStateOf(false) }
-    var showIgnoredManager by remember { mutableStateOf(false) }
 
-    // فیلترهای دفتر روزنامه
     var searchQuery by remember { mutableStateOf("") }
     var selectedTypeFilter by remember { mutableStateOf(TypeFilter.ALL) }
     var selectedAccountFilter by remember { mutableStateOf("همه حساب‌ها") }
     var selectedCategoryFilter by remember { mutableStateOf("همه دسته‌ها") }
 
-    // تراکنش‌های فیلترشده بر اساس صندوق انتخابی (شخصی / ساختمان / کل)
+    val discrepancies by remember(allTransactions) {
+        derivedStateOf { IranBankSmsParser.findDiscrepancies(allTransactions) }
+    }
+
     val scopedTransactions by remember(allTransactions, selectedScope) {
         derivedStateOf {
-            when (selectedScope) {
-                ScopeTab.ALL -> allTransactions
-                ScopeTab.PERSONAL -> allTransactions.filter { it.scope == "PERSONAL" }
-                ScopeTab.BUILDING -> allTransactions.filter { it.scope == "BUILDING" }
-            }
+            if (selectedScope == "همه صندوق‌ها") allTransactions
+            else allTransactions.filter { it.scope == selectedScope }
         }
     }
 
     val scopedDiscrepancies by remember(discrepancies, accountProfiles, selectedScope) {
         derivedStateOf {
-            val scopeMap = accountProfiles.associate { it.accountKey to it.scope }
-            when (selectedScope) {
-                ScopeTab.ALL -> discrepancies
-                ScopeTab.PERSONAL -> discrepancies.filter { scopeMap[it.accountKey] == "PERSONAL" }
-                ScopeTab.BUILDING -> discrepancies.filter { scopeMap[it.accountKey] == "BUILDING" }
+            if (selectedScope == "همه صندوق‌ها") discrepancies
+            else {
+                val scopeMap = accountProfiles.associate { it.accountKey to it.scope }
+                discrepancies.filter { scopeMap[it.accountKey] == selectedScope }
             }
         }
     }
 
     val availableAccounts by remember(scopedTransactions) {
         derivedStateOf {
-            val accs = scopedTransactions.map { it.accountKey }.distinct().sorted()
-            listOf("همه حساب‌ها") + accs
+            listOf("همه حساب‌ها") + scopedTransactions.map { it.accountKey }.distinct().sorted()
         }
     }
 
-    val availableCategoryFilters by remember(categories, selectedScope) {
+    val availableCategoryFilters by remember(categories) {
         derivedStateOf {
-            val filteredCats = categories.filter {
-                selectedScope == ScopeTab.ALL || it.scope == "ALL" || it.scope == selectedScope.code
-            }.map { it.name }
-            listOf("همه دسته‌ها", "دسته‌بندی نشده") + filteredCats
+            listOf("همه دسته‌ها", "دسته‌بندی نشده") + categories.map { it.name }
         }
     }
 
@@ -207,6 +222,7 @@ fun HolooSmsAccountingApp(
                         tx.userNote.contains(query, ignoreCase = true) ||
                         tx.category.contains(query, ignoreCase = true) ||
                         tx.accountKey.contains(query, ignoreCase = true) ||
+                        tx.payerIdentifier.contains(query, ignoreCase = true) ||
                         tx.rawMessage.contains(query, ignoreCase = true) ||
                         tx.amount.toString().contains(query)
 
@@ -215,7 +231,7 @@ fun HolooSmsAccountingApp(
         }
     }
 
-    val loadData: () -> Unit = {
+    val fullReloadFromSms: () -> Unit = {
         coroutineScope.launch {
             isLoading = true
             withContext(Dispatchers.IO) {
@@ -226,23 +242,46 @@ fun HolooSmsAccountingApp(
                 }
                 categories = currentCats
 
+                val settingsMap = appDao.getAllSettings().associate { it.settingKey to it.settingValue }
+                val savedScale = settingsMap["font_scale"]?.toFloatOrNull() ?: 1.0f
+                withContext(Dispatchers.Main) { onFontScaleLoaded(savedScale) }
+
+                val savedScopesStr = settingsMap["custom_scopes"]
+                if (!savedScopesStr.isNullOrBlank()) {
+                    customScopes = savedScopesStr.split("|").filter { it.isNotBlank() }
+                }
+
                 val ignoredList = appDao.getAllIgnored()
                 ignoredItems = ignoredList
                 val ignoredIds = ignoredList.filter { !it.isSenderBlocked }.map { it.keyId }.toSet()
                 val blockedSenders = ignoredList.filter { it.isSenderBlocked }.map { it.keyId }.toSet()
 
-                val savedNotesMap = appDao.getAllNotes().associateBy { it.smsId }
-                val existingProfilesMap = appDao.getAllAccountProfiles().associateBy { it.accountKey }
+                val mappingsList = appDao.getAllPayerMappings()
+                payerMappings = mappingsList
+                val mappingsMap = mappingsList.associate { it.payerIdentifier to it.unitTitle }
 
-                val (txList, updatedProfiles) = readBankSmsList(
+                val savedNotesMap = appDao.getAllNotes().associateBy { it.smsId }
+                val existingProfilesMap = appDao.getAllAccountProfiles().associate {
+                    val normalizedScope = when (it.scope) {
+                        "PERSONAL" -> "شخصی"
+                        "BUILDING" -> "مدیریت ساختمان"
+                        else -> it.scope
+                    }
+                    it.accountKey to it.copy(scope = normalizedScope)
+                }
+
+                val importedList = appDao.getAllImportedRecords()
+
+                val (txList, updatedProfiles) = readAllTransactionsFast(
                     context = context,
                     savedNotes = savedNotesMap,
                     accountProfiles = existingProfilesMap,
+                    payerMappings = mappingsMap,
+                    importedRecords = importedList,
                     ignoredSmsIds = ignoredIds,
                     blockedSenders = blockedSenders
                 )
 
-                // ذخیره پروفایل حساب‌های جدید کشف‌شده در دیتابیس
                 updatedProfiles.forEach { prof ->
                     if (!existingProfilesMap.containsKey(prof.accountKey)) {
                         appDao.saveAccountProfile(prof)
@@ -251,7 +290,6 @@ fun HolooSmsAccountingApp(
 
                 accountProfiles = updatedProfiles
                 allTransactions = txList
-                discrepancies = IranBankSmsParser.findDiscrepancies(txList)
             }
             isLoading = false
         }
@@ -263,12 +301,12 @@ fun HolooSmsAccountingApp(
         val readGranted = permissions[Manifest.permission.READ_SMS] ?: false
         val receiveGranted = permissions[Manifest.permission.RECEIVE_SMS] ?: false
         hasSmsPermission = readGranted && receiveGranted
-        if (hasSmsPermission) loadData()
+        if (hasSmsPermission) fullReloadFromSms()
     }
 
     LaunchedEffect(hasSmsPermission) {
         if (hasSmsPermission && allTransactions.isEmpty()) {
-            loadData()
+            fullReloadFromSms()
         }
     }
 
@@ -288,73 +326,88 @@ fun HolooSmsAccountingApp(
         onNewBankTransaction = {
             coroutineScope.launch {
                 delay(1500L)
-                loadData()
+                fullReloadFromSms()
             }
         }
     )
 
     Scaffold(
         topBar = {
-            Column(modifier = Modifier.background(Color(0xFF1A237E))) {
+            Column(modifier = Modifier.background(Color(0xFF0F2942))) {
                 TopAppBar(
                     title = {
-                        Column {
-                            Text("حسابداری هوشمند پیامکی", fontWeight = FontWeight.Bold, fontSize = 17.sp, color = Color.White)
-                            Text("تفکیک شخصی و مدیریت ساختمان", fontSize = 11.sp, color = Color(0xFFC5CAE9))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Rounded.AccountBalanceWallet,
+                                contentDescription = null,
+                                tint = Color(0xFF64B5F6),
+                                modifier = Modifier.size(26.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text("حسابداری هوشمند", style = MaterialTheme.typography.titleMedium, color = Color.White)
+                                Text("مدیریت شخصی و ساختمان", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB0BEC5))
+                            }
                         }
                     },
                     actions = {
                         if (hasSmsPermission) {
                             IconButton(onClick = { showCategoryManager = true }) {
-                                Icon(Icons.Default.Category, contentDescription = "دسته‌بندی‌ها", tint = Color.White)
-                            }
-                            IconButton(onClick = { showIgnoredManager = true }) {
-                                Icon(Icons.Default.Block, contentDescription = "مسدودشده‌ها", tint = Color.White)
+                                Icon(Icons.Rounded.Category, contentDescription = "سرفصل‌ها", tint = Color.White)
                             }
                             IconButton(
-                                onClick = { CsvExporter.exportAndShareCsv(context, journalTransactions, selectedScope.title) },
+                                onClick = { CsvExporter.exportAndShareCsv(context, journalTransactions, selectedScope) },
                                 enabled = journalTransactions.isNotEmpty()
                             ) {
-                                Icon(Icons.Default.FileDownload, contentDescription = "خروجی اکسل", tint = Color.White)
+                                Icon(Icons.Rounded.IosShare, contentDescription = "خروجی اکسل", tint = Color.White)
                             }
-                            IconButton(onClick = { loadData() }) {
-                                Icon(Icons.Default.Refresh, contentDescription = "بروزرسانی", tint = Color.White)
+                            IconButton(onClick = { fullReloadFromSms() }) {
+                                Icon(Icons.Rounded.Sync, contentDescription = "بروزرسانی پیامک‌ها", tint = Color.White)
                             }
                         }
                     },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF1A237E))
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF0F2942))
                 )
 
-                // سوییچر تفکیک صندوق‌ها (کل / شخصی / مدیریت ساختمان)
                 if (hasSmsPermission) {
-                    Row(
+                    val allScopes = listOf("همه صندوق‌ها") + customScopes
+                    LazyRow(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        ScopeTab.entries.forEach { tab ->
-                            val isSelected = selectedScope == tab
+                        items(allScopes) { scopeName ->
+                            val isSelected = selectedScope == scopeName
                             Surface(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clickable {
-                                        selectedScope = tab
-                                        selectedAccountFilter = "همه حساب‌ها"
-                                        selectedCategoryFilter = "همه دسته‌ها"
-                                    },
-                                shape = RoundedCornerShape(8.dp),
-                                color = if (isSelected) Color.White else Color(0xFF283593)
+                                modifier = Modifier.clickable {
+                                    selectedScope = scopeName
+                                    selectedAccountFilter = "همه حساب‌ها"
+                                    selectedCategoryFilter = "همه دسته‌ها"
+                                },
+                                shape = RoundedCornerShape(20.dp),
+                                color = if (isSelected) Color(0xFF42A5F5) else Color(0xFF1C3B59)
                             ) {
-                                Box(
-                                    modifier = Modifier.padding(vertical = 8.dp),
-                                    contentAlignment = Alignment.Center
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
+                                    Icon(
+                                        imageVector = when (scopeName) {
+                                            "مدیریت ساختمان" -> Icons.Rounded.Apartment
+                                            "شخصی" -> Icons.Rounded.Person
+                                            else -> Icons.Rounded.FolderShared
+                                        },
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
                                     Text(
-                                        text = tab.title,
-                                        fontSize = 12.sp,
+                                        text = scopeName,
+                                        style = MaterialTheme.typography.labelMedium,
                                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                        color = if (isSelected) Color(0xFF1A237E) else Color.White
+                                        color = Color.White
                                     )
                                 }
                             }
@@ -369,18 +422,24 @@ fun HolooSmsAccountingApp(
                     NavigationBarItem(
                         selected = bottomTabIndex == 0,
                         onClick = { bottomTabIndex = 0 },
-                        icon = { Icon(Icons.Default.Dashboard, contentDescription = null) },
-                        label = { Text("داشبورد و نمودار", fontSize = 11.sp) }
+                        icon = { Icon(Icons.Rounded.PieChart, contentDescription = null) },
+                        label = { Text("داشبورد", style = MaterialTheme.typography.labelSmall) }
                     )
                     NavigationBarItem(
                         selected = bottomTabIndex == 1,
                         onClick = { bottomTabIndex = 1 },
-                        icon = { Icon(Icons.Default.ReceiptLong, contentDescription = null) },
-                        label = { Text("دفتر روزنامه", fontSize = 11.sp) }
+                        icon = { Icon(Icons.Rounded.ReceiptLong, contentDescription = null) },
+                        label = { Text("تراکنش‌ها", style = MaterialTheme.typography.labelSmall) }
                     )
                     NavigationBarItem(
                         selected = bottomTabIndex == 2,
                         onClick = { bottomTabIndex = 2 },
+                        icon = { Icon(Icons.Rounded.Analytics, contentDescription = null) },
+                        label = { Text("گزارشات", style = MaterialTheme.typography.labelSmall) }
+                    )
+                    NavigationBarItem(
+                        selected = bottomTabIndex == 3,
+                        onClick = { bottomTabIndex = 3 },
                         icon = {
                             BadgedBox(
                                 badge = {
@@ -389,16 +448,10 @@ fun HolooSmsAccountingApp(
                                     }
                                 }
                             ) {
-                                Icon(Icons.Default.AccountBalance, contentDescription = null)
+                                Icon(Icons.Rounded.Tune, contentDescription = null)
                             }
                         },
-                        label = { Text("حساب و مغایرت", fontSize = 11.sp) }
-                    )
-                    NavigationBarItem(
-                        selected = bottomTabIndex == 3,
-                        onClick = { bottomTabIndex = 3 },
-                        icon = { Icon(Icons.Default.Assessment, contentDescription = null) },
-                        label = { Text("گزارشات", fontSize = 11.sp) }
+                        label = { Text("تنظیمات", style = MaterialTheme.typography.labelSmall) }
                     )
                 }
             }
@@ -416,16 +469,22 @@ fun HolooSmsAccountingApp(
                     )
                 }
                 isLoading -> {
-                    CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+                    Column(
+                        modifier = Modifier.align(Alignment.Center),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        CircularProgressIndicator(color = Color(0xFF0F2942))
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text("در حال پردازش اسناد بانکی...", style = MaterialTheme.typography.bodyMedium)
+                    }
                 }
                 else -> {
                     when (bottomTabIndex) {
                         0 -> DashboardScreen(
                             transactions = scopedTransactions,
-                            accountProfiles = accountProfiles,
                             discrepancyCount = scopedDiscrepancies.size,
-                            scopeTitle = selectedScope.title,
-                            onNavigateToDiscrepancies = { bottomTabIndex = 2 }
+                            scopeTitle = selectedScope,
+                            onNavigateToDiscrepancies = { bottomTabIndex = 3 }
                         )
                         1 -> JournalScreen(
                             transactions = journalTransactions,
@@ -441,22 +500,64 @@ fun HolooSmsAccountingApp(
                             onCategoryChange = { selectedCategoryFilter = it },
                             onTransactionClick = { selectedTransaction = it }
                         )
-                        2 -> AccountsAndDiscrepanciesScreen(
+                        2 -> AdvancedReportsScreen(
+                            transactions = scopedTransactions,
+                            scopeTitle = selectedScope,
+                            onExportCsv = { listToExport ->
+                                CsvExporter.exportAndShareCsv(context, listToExport, selectedScope)
+                            }
+                        )
+                        3 -> SettingsAndReconciliationScreen(
                             accountProfiles = accountProfiles,
                             transactions = allTransactions,
                             discrepancies = scopedDiscrepancies,
-                            onToggleAccountScope = { profile, newScope ->
+                            customScopes = customScopes,
+                            payerMappings = payerMappings,
+                            ignoredItems = ignoredItems,
+                            fontScale = fontScale,
+                            onFontScaleChange = { newScale ->
+                                onFontScaleChanged(newScale)
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.saveSetting(AppSettingEntity("font_scale", newScale.toString()))
+                                }
+                            },
+                            onAddCustomScope = { newScopeName ->
+                                if (newScopeName.isNotBlank() && !customScopes.contains(newScopeName)) {
+                                    val updated = customScopes + newScopeName
+                                    customScopes = updated
+                                    coroutineScope.launch(Dispatchers.IO) {
+                                        appDao.saveSetting(AppSettingEntity("custom_scopes", updated.joinToString("|")))
+                                    }
+                                }
+                            },
+                            onChangeAccountScope = { profile, newScope ->
+                                accountProfiles = accountProfiles.map {
+                                    if (it.accountKey == profile.accountKey) it.copy(scope = newScope) else it
+                                }
+                                allTransactions = allTransactions.map {
+                                    if (it.accountKey == profile.accountKey) it.copy(scope = newScope) else it
+                                }
                                 coroutineScope.launch(Dispatchers.IO) {
                                     appDao.saveAccountProfile(profile.copy(scope = newScope))
-                                    loadData()
                                 }
-                            }
-                        )
-                        3 -> ReportsScreen(
-                            transactions = scopedTransactions,
-                            scopeTitle = selectedScope.title,
-                            onExportCsv = {
-                                CsvExporter.exportAndShareCsv(context, scopedTransactions, selectedScope.title)
+                            },
+                            onImportExcelRecords = { newRecords ->
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.insertImportedRecords(newRecords)
+                                    fullReloadFromSms()
+                                }
+                            },
+                            onDeletePayerMapping = { payerId ->
+                                payerMappings = payerMappings.filterNot { it.payerIdentifier == payerId }
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.deletePayerMapping(payerId)
+                                }
+                            },
+                            onRestoreIgnored = { keyId ->
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.removeIgnored(keyId)
+                                    fullReloadFromSms()
+                                }
                             }
                         )
                     }
@@ -464,13 +565,48 @@ fun HolooSmsAccountingApp(
             }
         }
 
-        // دیالوگ ثبت سند، دسته‌بندی، ورودی صوتی و انتقال بین حساب‌ها
         selectedTransaction?.let { currentTx ->
             TransactionDetailDialog(
                 transaction = currentTx,
                 categories = categories,
                 onDismiss = { selectedTransaction = null },
-                onSave = { newCategory, newNote, transferOverride ->
+                onSave = { newCategory, newNote, transferOverride, assignUnitToPayerCard ->
+                    val targetPayer = currentTx.payerIdentifier
+                    val shouldAutoPropagate = assignUnitToPayerCard && targetPayer.isNotEmpty() && newNote.isNotBlank()
+
+                    allTransactions = allTransactions.map { tx ->
+                        when {
+                            tx.id == currentTx.id -> {
+                                val updatedType = when {
+                                    transferOverride == true -> TransactionType.INTERNAL
+                                    transferOverride == false && tx.type == TransactionType.INTERNAL ->
+                                        if ((tx.balance ?: 0L) > 0) TransactionType.DEPOSIT else TransactionType.WITHDRAWAL
+                                    else -> tx.type
+                                }
+                                tx.copy(
+                                    userNote = newNote,
+                                    category = newCategory,
+                                    type = updatedType
+                                )
+                            }
+                            shouldAutoPropagate && tx.payerIdentifier == targetPayer -> {
+                                tx.copy(
+                                    userNote = newNote,
+                                    category = newCategory.ifBlank { "شارژ ماهیانه واحدها" }
+                                )
+                            }
+                            else -> tx
+                        }
+                    }
+
+                    if (shouldAutoPropagate) {
+                        val updatedMapList = payerMappings.filterNot { it.payerIdentifier == targetPayer } +
+                                PayerUnitMappingEntity(targetPayer, newNote)
+                        payerMappings = updatedMapList
+                    }
+
+                    selectedTransaction = null
+
                     coroutineScope.launch(Dispatchers.IO) {
                         appDao.saveNote(
                             TransactionNoteEntity(
@@ -480,39 +616,50 @@ fun HolooSmsAccountingApp(
                                 isInternalTransferOverride = transferOverride
                             )
                         )
-                        loadData()
+                        if (shouldAutoPropagate) {
+                            appDao.savePayerMapping(PayerUnitMappingEntity(targetPayer, newNote))
+                            val matchingIds = allTransactions.filter { it.payerIdentifier == targetPayer && it.id != currentTx.id }
+                            val batchNotes = matchingIds.map {
+                                TransactionNoteEntity(
+                                    smsId = it.id,
+                                    note = newNote,
+                                    category = newCategory.ifBlank { "شارژ ماهیانه واحدها" }
+                                )
+                            }
+                            if (batchNotes.isNotEmpty()) {
+                                appDao.saveNotesBatch(batchNotes)
+                            }
+                        }
                     }
-                    selectedTransaction = null
+
+                    if (shouldAutoPropagate) {
+                        Toast.makeText(context, "واحد «$newNote» برای تمام واریزهای این کارت اعمال شد", Toast.LENGTH_SHORT).show()
+                    }
                 },
                 onMarkAsNotBankSms = { blockEntireSender ->
-                    coroutineScope.launch(Dispatchers.IO) {
-                        if (blockEntireSender) {
-                            appDao.addIgnored(
-                                IgnoredItemEntity(
-                                    keyId = currentTx.sender,
-                                    isSenderBlocked = true,
-                                    label = "سرشماره مسدودشده: ${currentTx.sender}"
-                                )
-                            )
-                        } else {
-                            appDao.addIgnored(
-                                IgnoredItemEntity(
-                                    keyId = currentTx.id,
-                                    isSenderBlocked = false,
-                                    label = "پیامک ${currentTx.sender} (${currentTx.persianDate})"
-                                )
-                            )
-                        }
-                        loadData()
+                    if (blockEntireSender) {
+                        allTransactions = allTransactions.filterNot { it.sender == currentTx.sender }
+                    } else {
+                        allTransactions = allTransactions.filterNot { it.id == currentTx.id }
                     }
                     selectedTransaction = null
-                    Toast.makeText(context, "با موفقیت از محاسبات حذف شد", Toast.LENGTH_SHORT).show()
+
+                    coroutineScope.launch(Dispatchers.IO) {
+                        if (blockEntireSender) {
+                            appDao.addIgnored(IgnoredItemEntity(currentTx.sender, true, "سرشماره: ${currentTx.sender}"))
+                        } else {
+                            appDao.addIgnored(IgnoredItemEntity(currentTx.id, false, "پیامک ${currentTx.sender} (${currentTx.persianDate})"))
+                        }
+                        ignoredItems = appDao.getAllIgnored()
+                    }
+                    Toast.makeText(context, "بلافاصله از لیست و آمار حذف شد", Toast.LENGTH_SHORT).show()
                 },
                 onAddNewCategory = { newCatName ->
+                    val isExp = currentTx.type != TransactionType.DEPOSIT
+                    val newCat = CategoryEntity(newCatName, isExp, "ALL")
+                    categories = categories + newCat
                     coroutineScope.launch(Dispatchers.IO) {
-                        val isExp = currentTx.type != TransactionType.DEPOSIT
-                        appDao.addCategory(CategoryEntity(newCatName, isExp, currentTx.scope))
-                        categories = appDao.getAllCategories()
+                        appDao.addCategory(newCat)
                     }
                 }
             )
@@ -522,29 +669,17 @@ fun HolooSmsAccountingApp(
             CategoryManagerDialog(
                 categories = categories,
                 onDismiss = { showCategoryManager = false },
-                onAddCategory = { name, isExpense, scope ->
+                onAddCategory = { name, isExpense ->
+                    val newCat = CategoryEntity(name, isExpense, "ALL")
+                    categories = categories + newCat
                     coroutineScope.launch(Dispatchers.IO) {
-                        appDao.addCategory(CategoryEntity(name, isExpense, scope))
-                        categories = appDao.getAllCategories()
+                        appDao.addCategory(newCat)
                     }
                 },
                 onDeleteCategory = { name ->
+                    categories = categories.filterNot { it.name == name }
                     coroutineScope.launch(Dispatchers.IO) {
                         appDao.deleteCategory(name)
-                        categories = appDao.getAllCategories()
-                    }
-                }
-            )
-        }
-
-        if (showIgnoredManager) {
-            IgnoredItemsDialog(
-                ignoredItems = ignoredItems,
-                onDismiss = { showIgnoredManager = false },
-                onRestoreItem = { keyId ->
-                    coroutineScope.launch(Dispatchers.IO) {
-                        appDao.removeIgnored(keyId)
-                        loadData()
                     }
                 }
             )
@@ -552,13 +687,9 @@ fun HolooSmsAccountingApp(
     }
 }
 
-// ============================================================================
-// تب ۱: داشبورد مدیریتی و نمودارهای پویا
-// ============================================================================
 @Composable
 fun DashboardScreen(
     transactions: List<BankTransaction>,
-    accountProfiles: List<AccountProfileEntity>,
     discrepancyCount: Int,
     scopeTitle: String,
     onNavigateToDiscrepancies: () -> Unit
@@ -582,7 +713,6 @@ fun DashboardScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // کارت هشدار مغایرت در صورت وجود
         if (discrepancyCount > 0) {
             Card(
                 modifier = Modifier
@@ -591,31 +721,27 @@ fun DashboardScreen(
                 colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E0)),
                 shape = RoundedCornerShape(12.dp)
             ) {
-                Row(
-                    modifier = Modifier.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFFE65100))
+                Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.WarningAmber, contentDescription = null, tint = Color(0xFFE65100))
                     Spacer(modifier = Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "هشدار مغایرت حسابداری ($discrepancyCount مورد)",
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFFE65100),
-                            fontSize = 13.sp
+                            style = MaterialTheme.typography.titleSmall
                         )
                         Text(
-                            text = "اختلاف بین مانده حساب‌ها در پیامک‌ها شناسایی شد. برای بررسی لمس کنید.",
-                            fontSize = 11.sp,
+                            text = "برای بررسی یا بارگذاری فایل اکسل بانک جهت رفع مغایرت لمس کنید.",
+                            style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFF5D4037)
                         )
                     }
-                    Icon(Icons.Default.ChevronLeft, contentDescription = null, tint = Color(0xFFE65100))
+                    Icon(Icons.Rounded.ChevronLeft, contentDescription = null, tint = Color(0xFFE65100))
                 }
             }
         }
 
-        // کارت خلاصه تراز مالی (سبک داشبورد هلو)
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -623,89 +749,76 @@ fun DashboardScreen(
             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("تراز مالی ($scopeTitle)", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Color(0xFF1A237E))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.AccountBalance, contentDescription = null, tint = Color(0xFF0F2942), modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("تراز مالی ($scopeTitle)", style = MaterialTheme.typography.titleMedium, color = Color(0xFF0F2942))
+                }
                 Spacer(modifier = Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Column {
-                        Text("کل واریزی‌ها (بستانکار)", fontSize = 12.sp, color = Color.Gray)
+                        Text("کل واریزی‌ها (بستانکار)", style = MaterialTheme.typography.labelMedium, color = Color.Gray)
                         Text(
                             text = "+${formatCurrency(totalDeposit)} ریال",
+                            style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.ExtraBold,
-                            fontSize = 14.sp,
                             color = Color(0xFF2E7D32)
                         )
                     }
                     Column(horizontalAlignment = Alignment.End) {
-                        Text("کل برداشت‌ها (بدهکار)", fontSize = 12.sp, color = Color.Gray)
+                        Text("کل برداشت‌ها (بدهکار)", style = MaterialTheme.typography.labelMedium, color = Color.Gray)
                         Text(
                             text = "-${formatCurrency(totalWithdrawal)} ریال",
+                            style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.ExtraBold,
-                            fontSize = 14.sp,
                             color = Color(0xFFC62828)
                         )
                     }
                 }
                 HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("جریان خالص نقدینگی:", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("جریان خالص نقدینگی:", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                     val net = totalDeposit - totalWithdrawal
                     Text(
                         text = "${if (net >= 0) "+" else ""}${formatCurrency(net)} ریال",
+                        style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp,
                         color = if (net >= 0) Color(0xFF1565C0) else Color(0xFFC62828)
                     )
                 }
                 if (internalTransferSum > 0) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "انتقال بین حساب‌های خودی (کسر شده از تورم آمار): ${formatCurrency(internalTransferSum)} ریال",
-                        fontSize = 11.sp,
+                        text = "انتقال بین حساب‌های خودی: ${formatCurrency(internalTransferSum)} ریال",
+                        style = MaterialTheme.typography.labelSmall,
                         color = Color(0xFF0277BD)
                     )
                 }
             }
         }
 
-        // سوییچر نمودار هزینه / درآمد
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(
                 selected = chartExpenseMode,
                 onClick = { chartExpenseMode = true },
                 label = { Text("نمودار هزینه‌ها") },
+                leadingIcon = { Icon(Icons.Rounded.TrendingDown, contentDescription = null, modifier = Modifier.size(16.dp)) },
                 modifier = Modifier.weight(1f)
             )
             FilterChip(
                 selected = !chartExpenseMode,
                 onClick = { chartExpenseMode = false },
                 label = { Text("نمودار درآمدها") },
+                leadingIcon = { Icon(Icons.Rounded.TrendingUp, contentDescription = null, modifier = Modifier.size(16.dp)) },
                 modifier = Modifier.weight(1f)
             )
         }
 
-        // نمودار دایره‌ای تعاملی دسته‌بندی‌ها
-        InteractiveCategoryDonutChart(
-            transactions = transactions,
-            isExpenseMode = chartExpenseMode
-        )
-
-        // نمودار میله‌ای مقایسه ماهانه
+        InteractiveCategoryDonutChart(transactions = transactions, isExpenseMode = chartExpenseMode)
         MonthlyComparisonBarChart(transactions = transactions)
     }
 }
 
-// ============================================================================
-// تب ۲: دفتر روزنامه (لیست اسناد و تراکنش‌ها)
-// ============================================================================
 @Composable
 fun JournalScreen(
     transactions: List<BankTransaction>,
@@ -732,12 +845,12 @@ fun JournalScreen(
                 value = searchQuery,
                 onValueChange = onSearchChange,
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("جستجو در شرح سند، دسته، حساب یا پیامک...", fontSize = 13.sp) },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                placeholder = { Text("جستجو در واحد، دسته، کارت، حساب یا پیامک...", style = MaterialTheme.typography.bodySmall) },
+                leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
                 trailingIcon = {
                     if (searchQuery.isNotEmpty()) {
                         IconButton(onClick = { onSearchChange("") }) {
-                            Icon(Icons.Default.Close, contentDescription = null)
+                            Icon(Icons.Rounded.Close, contentDescription = null)
                         }
                     }
                 },
@@ -752,7 +865,7 @@ fun JournalScreen(
                     FilterChip(
                         selected = selectedType == filter,
                         onClick = { onTypeChange(filter) },
-                        label = { Text(filter.title, fontSize = 12.sp) }
+                        label = { Text(filter.title, style = MaterialTheme.typography.labelMedium) }
                     )
                 }
             }
@@ -763,7 +876,7 @@ fun JournalScreen(
                         FilterChip(
                             selected = selectedAccount == acc,
                             onClick = { onAccountChange(acc) },
-                            label = { Text(acc, fontSize = 11.sp) }
+                            label = { Text(acc, style = MaterialTheme.typography.labelSmall) }
                         )
                     }
                 }
@@ -774,7 +887,7 @@ fun JournalScreen(
                     FilterChip(
                         selected = selectedCategory == cat,
                         onClick = { onCategoryChange(cat) },
-                        label = { Text(cat, fontSize = 11.sp) }
+                        label = { Text(cat, style = MaterialTheme.typography.labelSmall) }
                     )
                 }
             }
@@ -797,163 +910,52 @@ fun JournalScreen(
     }
 }
 
-// ============================================================================
-// تب ۳: مدیریت حساب‌ها (تفکیک شخصی / ساختمان) و کشف مغایرت‌ها
-// ============================================================================
 @Composable
-fun AccountsAndDiscrepanciesScreen(
-    accountProfiles: List<AccountProfileEntity>,
+fun AdvancedReportsScreen(
     transactions: List<BankTransaction>,
-    discrepancies: List<AccountDiscrepancy>,
-    onToggleAccountScope: (AccountProfileEntity, String) -> Unit
+    scopeTitle: String,
+    onExportCsv: (List<BankTransaction>) -> Unit
 ) {
-    LazyColumn(
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+    var periodMode by remember { mutableStateOf(ReportPeriodMode.ALL) }
+
+    val availableYears = remember(transactions) {
+        transactions.map { it.persianYear }.distinct().sortedDescending()
+    }
+    val availableMonths = remember(transactions) {
+        transactions.map { it.persianMonthYear }.distinct().sortedDescending()
+    }
+
+    var selectedYear by remember(availableYears) { mutableStateOf(availableYears.firstOrNull() ?: "1405") }
+    var selectedMonth by remember(availableMonths) { mutableStateOf(availableMonths.firstOrNull() ?: "1405/09") }
+    var fromDateText by remember { mutableStateOf("1405/01/01") }
+    var toDateText by remember { mutableStateOf("1405/12/29") }
+
+    val reportTransactions by remember(
+        transactions, periodMode, selectedYear, selectedMonth, fromDateText, toDateText
     ) {
-        item {
-            Text(
-                text = "تفکیک حساب‌های شخصی و مدیریت ساختمان",
-                fontWeight = FontWeight.Bold,
-                fontSize = 16.sp,
-                color = Color(0xFF1A237E)
-            )
-            Text(
-                text = "برای هر شماره حساب مشخص کنید مربوط به امور شخصی است یا صندوق ساختمان:",
-                fontSize = 12.sp,
-                color = Color.Gray
-            )
-        }
-
-        items(accountProfiles, key = { it.accountKey }) { profile ->
-            val latestTx = transactions.firstOrNull { it.accountKey == profile.accountKey && it.balance != null }
-            val isBuilding = profile.scope == "BUILDING"
-
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-            ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text(profile.accountKey, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                            latestTx?.balance?.let { bal ->
-                                Text(
-                                    text = "آخرین موجودی: ${formatCurrency(bal)} ریال",
-                                    fontSize = 12.sp,
-                                    color = Color(0xFF2E7D32)
-                                )
-                            }
-                        }
-                        Surface(
-                            color = if (isBuilding) Color(0xFFE8EAF6) else Color(0xFFE0F2F1),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text(
-                                text = if (isBuilding) "مدیریت ساختمان" else "حساب شخصی",
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isBuilding) Color(0xFF1A237E) else Color(0xFF00695C)
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(
-                            selected = !isBuilding,
-                            onClick = { onToggleAccountScope(profile, "PERSONAL") },
-                            label = { Text("حساب شخصی", fontSize = 12.sp) },
-                            modifier = Modifier.weight(1f)
-                        )
-                        FilterChip(
-                            selected = isBuilding,
-                            onClick = { onToggleAccountScope(profile, "BUILDING") },
-                            label = { Text("حساب ساختمان", fontSize = 12.sp) },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-            }
-        }
-
-        item {
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "گزارش مغایرت‌های حسابداری (${discrepancies.size})",
-                fontWeight = FontWeight.Bold,
-                fontSize = 16.sp,
-                color = Color(0xFFC62828)
-            )
-            Text(
-                text = "مواردی که مانده پیامک جدید با جمع و تفریق مانده قبلی هم‌خوانی ندارد:",
-                fontSize = 12.sp,
-                color = Color.Gray
-            )
-        }
-
-        if (discrepancies.isEmpty()) {
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E9)),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF2E7D32))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("هیچ مغایرتی در مانده حساب‌ها یافت نشد. تمام تراکنش‌ها تراز هستند.", fontSize = 13.sp)
-                    }
-                }
-            }
-        } else {
-            items(discrepancies) { disc ->
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFEBEE)),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(disc.accountKey, fontWeight = FontWeight.Bold, color = Color(0xFFB71C1C), fontSize = 14.sp)
-                            Text(disc.date, fontSize = 11.sp, color = Color.DarkGray)
-                        }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(disc.description, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "مانده قبلی: ${formatCurrency(disc.previousBalance)} | مانده ثبت‌شده: ${formatCurrency(disc.currentBalance)}",
-                            fontSize = 11.sp,
-                            color = Color.DarkGray
-                        )
-                    }
+        derivedStateOf {
+            when (periodMode) {
+                ReportPeriodMode.ALL -> transactions
+                ReportPeriodMode.YEARLY -> transactions.filter { it.persianYear == selectedYear }
+                ReportPeriodMode.MONTHLY -> transactions.filter { it.persianMonthYear == selectedMonth }
+                ReportPeriodMode.CUSTOM_RANGE -> {
+                    val f = IranBankSmsParser.normalizePersian(fromDateText.trim())
+                    val t = IranBankSmsParser.normalizePersian(toDateText.trim())
+                    transactions.filter { it.persianDateOnly >= f && it.persianDateOnly <= t }
                 }
             }
         }
     }
-}
 
-// ============================================================================
-// تب ۴: گزارشات جامع (ترازنامه دسته‌بندی‌ها و خروجی اکسل)
-// ============================================================================
-@Composable
-fun ReportsScreen(
-    transactions: List<BankTransaction>,
-    scopeTitle: String,
-    onExportCsv: () -> Unit
-) {
-    val expenseByCategory = remember(transactions) {
-        transactions
+    val totalDep = remember(reportTransactions) {
+        reportTransactions.filter { it.type == TransactionType.DEPOSIT }.sumOf { it.amount }
+    }
+    val totalWit = remember(reportTransactions) {
+        reportTransactions.filter { it.type == TransactionType.WITHDRAWAL }.sumOf { it.amount }
+    }
+
+    val expenseByCategory = remember(reportTransactions) {
+        reportTransactions
             .filter { it.type == TransactionType.WITHDRAWAL }
             .groupBy { it.category.ifBlank { "دسته‌بندی نشده" } }
             .mapValues { it.value.sumOf { tx -> tx.amount } }
@@ -961,8 +963,8 @@ fun ReportsScreen(
             .sortedByDescending { it.second }
     }
 
-    val incomeByCategory = remember(transactions) {
-        transactions
+    val incomeByCategory = remember(reportTransactions) {
+        reportTransactions
             .filter { it.type == TransactionType.DEPOSIT }
             .groupBy { it.category.ifBlank { "دسته‌بندی نشده" } }
             .mapValues { it.value.sumOf { tx -> tx.amount } }
@@ -975,66 +977,338 @@ fun ReportsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Button(
-                onClick = onExportCsv,
+            Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A237E))
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(14.dp)
             ) {
-                Icon(Icons.Default.FileDownload, contentDescription = null)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("دریافت خروجی اکسل کامل ($scopeTitle)")
-            }
-        }
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text("بازه زمانی گزارش ($scopeTitle)", style = MaterialTheme.typography.titleSmall, color = Color(0xFF0F2942))
+                    Spacer(modifier = Modifier.height(8.dp))
 
-        item {
-            Text("خلاصه هزینه‌ها به تفکیک سرفصل ($scopeTitle)", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Color(0xFFC62828))
-        }
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(ReportPeriodMode.entries) { mode ->
+                            FilterChip(
+                                selected = periodMode == mode,
+                                onClick = { periodMode = mode },
+                                label = { Text(mode.title, style = MaterialTheme.typography.labelMedium) }
+                            )
+                        }
+                    }
 
-        if (expenseByCategory.isEmpty()) {
-            item { Text("هزینه‌ای ثبت نشده است.", fontSize = 13.sp, color = Color.Gray) }
-        } else {
-            items(expenseByCategory) { (cat, sum) ->
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = Color.White),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(cat, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                        Text("${formatCurrency(sum)} ریال", fontWeight = FontWeight.Bold, color = Color(0xFFC62828), fontSize = 14.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    when (periodMode) {
+                        ReportPeriodMode.ALL -> {
+                            Text("نمایش گزارش تجمیعی از ابتدا تا امروز", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                        }
+                        ReportPeriodMode.YEARLY -> {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(availableYears) { yr ->
+                                    FilterChip(
+                                        selected = selectedYear == yr,
+                                        onClick = { selectedYear = yr },
+                                        label = { Text("سال $yr") }
+                                    )
+                                }
+                            }
+                        }
+                        ReportPeriodMode.MONTHLY -> {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(availableMonths) { mo ->
+                                    FilterChip(
+                                        selected = selectedMonth == mo,
+                                        onClick = { selectedMonth = mo },
+                                        label = { Text(mo) }
+                                    )
+                                }
+                            }
+                        }
+                        ReportPeriodMode.CUSTOM_RANGE -> {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(
+                                    value = fromDateText,
+                                    onValueChange = { fromDateText = it },
+                                    label = { Text("از تاریخ (مثلاً 1405/08/01)", style = MaterialTheme.typography.labelSmall) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                OutlinedTextField(
+                                    value = toDateText,
+                                    onValueChange = { toDateText = it },
+                                    label = { Text("تا تاریخ (مثلاً 1405/09/30)", style = MaterialTheme.typography.labelSmall) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
+
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("واریز دوره: +${formatCurrency(totalDep)}", color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+                        Text("برداشت دوره: -${formatCurrency(totalWit)}", color = Color(0xFFC62828), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }
         }
 
         item {
-            Spacer(modifier = Modifier.height(6.dp))
-            Text("خلاصه درآمدها و واریزی‌ها به تفکیک سرفصل ($scopeTitle)", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Color(0xFF2E7D32))
+            Button(
+                onClick = { onExportCsv(reportTransactions) },
+                enabled = reportTransactions.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F2942))
+            ) {
+                Icon(Icons.Rounded.FileDownload, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("خروجی اکسل این بازه (${reportTransactions.size} سند)")
+            }
         }
 
-        if (incomeByCategory.isEmpty()) {
-            item { Text("واریزی ثبت نشده است.", fontSize = 13.sp, color = Color.Gray) }
+        item {
+            Text("هزینه‌های دوره به تفکیک سرفصل", style = MaterialTheme.typography.titleSmall, color = Color(0xFFC62828))
+        }
+        items(expenseByCategory) { (cat, sum) ->
+            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                Row(modifier = Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(cat, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    Text("${formatCurrency(sum)} ریال", color = Color(0xFFC62828), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        }
+
+        item {
+            Text("درآمدها و واریزی‌های دوره به تفکیک سرفصل", style = MaterialTheme.typography.titleSmall, color = Color(0xFF2E7D32))
+        }
+        items(incomeByCategory) { (cat, sum) ->
+            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                Row(modifier = Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(cat, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    Text("${formatCurrency(sum)} ریال", color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SettingsAndReconciliationScreen(
+    accountProfiles: List<AccountProfileEntity>,
+    transactions: List<BankTransaction>,
+    discrepancies: List<AccountDiscrepancy>,
+    customScopes: List<String>,
+    payerMappings: List<PayerUnitMappingEntity>,
+    ignoredItems: List<IgnoredItemEntity>,
+    fontScale: Float,
+    onFontScaleChange: (Float) -> Unit,
+    onAddCustomScope: (String) -> Unit,
+    onChangeAccountScope: (AccountProfileEntity, String) -> Unit,
+    onImportExcelRecords: (List<ImportedRecordEntity>) -> Unit,
+    onDeletePayerMapping: (String) -> Unit,
+    onRestoreIgnored: (String) -> Unit
+) {
+    val context = LocalContext.current
+    var newScopeInput by remember { mutableStateOf("") }
+    var selectedAccountForExcel by remember(accountProfiles) {
+        mutableStateOf(accountProfiles.firstOrNull()?.accountKey ?: "")
+    }
+
+    val excelPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null && selectedAccountForExcel.isNotEmpty()) {
+            try {
+                val imported = ExcelImporter.parseBankStatementCsv(
+                    context = context,
+                    uri = uri,
+                    targetAccountKey = selectedAccountForExcel,
+                    existingTransactions = transactions
+                )
+                if (imported.isEmpty()) {
+                    Toast.makeText(context, "تمام رکوردهای این فایل اکسل قبلاً در پیامک‌ها وجود داشتند!", Toast.LENGTH_LONG).show()
+                } else {
+                    onImportExcelRecords(imported)
+                    Toast.makeText(context, "${imported.size} تراکنش جاافتاده از فایل اکسل اضافه و مغایرت اصلاح شد!", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "خطا در خواندن فایل CSV: مطمئن شوید فایل با فرمت CSV ذخیره شده است", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(14.dp)) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.FormatSize, contentDescription = null, tint = Color(0xFF0F2942))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("تنظیم اندازه فونت برنامه", style = MaterialTheme.typography.titleSmall)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val scales = listOf(0.85f to "کوچک", 1.0f to "معمولی", 1.15f to "بزرگ", 1.3f to "خیلی بزرگ")
+                        scales.forEach { (sc, label) ->
+                            FilterChip(
+                                selected = kotlin.math.abs(fontScale - sc) < 0.05f,
+                                onClick = { onFontScaleChange(sc) },
+                                label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(14.dp)) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.AccountBalance, contentDescription = null, tint = Color(0xFF0F2942))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("مدیریت صندوق‌ها و تخصیص حساب‌های بانکی", style = MaterialTheme.typography.titleSmall)
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text("در صورت نیاز صندوق جدید بسازید و مشخص کنید هر حساب مربوط به کدام بخش است:", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = newScopeInput,
+                            onValueChange = { newScopeInput = it },
+                            placeholder = { Text("نام صندوق جدید (مثلاً: مغازه، پروژه...)", style = MaterialTheme.typography.bodySmall) },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(onClick = {
+                            onAddCustomScope(newScopeInput.trim())
+                            newScopeInput = ""
+                        }) { Text("افزودن") }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    accountProfiles.forEach { profile ->
+                        val latestBal = transactions.firstOrNull { it.accountKey == profile.accountKey && it.balance != null }?.balance
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                        Text(profile.accountKey, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                        if (latestBal != null) {
+                            Text("موجودی: ${formatCurrency(latestBal)} ریال", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2E7D32))
+                        }
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(customScopes) { sc ->
+                                FilterChip(
+                                    selected = profile.scope == sc,
+                                    onClick = { onChangeAccountScope(profile, sc) },
+                                    label = { Text(sc, style = MaterialTheme.typography.labelSmall) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(14.dp)) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.UploadFile, contentDescription = null, tint = Color(0xFF1565C0))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("بارگذاری فایل اکسل (CSV) گردش حساب بانک", style = MaterialTheme.typography.titleSmall)
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "فایل صورت‌حساب CSV دریافتی از اینترنت‌بانک را انتخاب کنید تا تراکنش‌های جاافتاده اضافه و مغایرت‌ها برطرف شوند:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    if (accountProfiles.isNotEmpty()) {
+                        Text("انتخاب حساب مقصد:", style = MaterialTheme.typography.labelSmall)
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(accountProfiles) { prof ->
+                                FilterChip(
+                                    selected = selectedAccountForExcel == prof.accountKey,
+                                    onClick = { selectedAccountForExcel = prof.accountKey },
+                                    label = { Text(prof.accountKey, style = MaterialTheme.typography.labelSmall) }
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = { excelPickerLauncher.launch("text/*") },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1565C0))
+                        ) {
+                            Icon(Icons.Rounded.FileUpload, contentDescription = null)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("انتخاب فایل اکسل (CSV) و رفع مغایرت")
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Text("مغایرت‌های مانده حساب (${discrepancies.size})", style = MaterialTheme.typography.titleSmall, color = Color(0xFFC62828))
+        }
+        if (discrepancies.isEmpty()) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E9))) {
+                    Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = Color(0xFF2E7D32))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("تمام حساب‌ها تراز هستند و هیچ مغایرتی وجود ندارد.", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
         } else {
-            items(incomeByCategory) { (cat, sum) ->
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = Color.White),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(cat, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                        Text("${formatCurrency(sum)} ریال", fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32), fontSize = 14.sp)
+            items(discrepancies) { disc ->
+                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFFFEBEE))) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("${disc.accountKey} (${disc.date})", fontWeight = FontWeight.Bold, color = Color(0xFFB71C1C), style = MaterialTheme.typography.bodySmall)
+                        Text(disc.description, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+
+        if (payerMappings.isNotEmpty()) {
+            item {
+                Text("کارت‌های متصل‌شده به واحدهای ساختمان (${payerMappings.size})", style = MaterialTheme.typography.titleSmall, color = Color(0xFF0F2942))
+            }
+            items(payerMappings) { mapItem ->
+                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                    Row(modifier = Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(mapItem.unitTitle, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                            Text("شماره کارت/حساب: ${mapItem.payerIdentifier}", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                        }
+                        IconButton(onClick = { onDeletePayerMapping(mapItem.payerIdentifier) }) {
+                            Icon(Icons.Rounded.DeleteOutline, contentDescription = null, tint = Color.Red)
+                        }
+                    }
+                }
+            }
+        }
+
+        if (ignoredItems.isNotEmpty()) {
+            item {
+                Text("پیامک‌ها و سرشماره‌های مسدودشده (${ignoredItems.size})", style = MaterialTheme.typography.titleSmall)
+            }
+            items(ignoredItems) { item ->
+                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                    Row(modifier = Modifier.fillMaxWidth().padding(10.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text(item.label.ifEmpty { item.keyId }, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { onRestoreIgnored(item.keyId) }) { Text("بازگردانی") }
                     }
                 }
             }
@@ -1042,9 +1316,6 @@ fun ReportsScreen(
     }
 }
 
-// ============================================================================
-// کامپوننت‌های مشترک: کارت تراکنش، دیالوگ ثبت سند، ورودی صوتی و مدیریت دسته‌ها
-// ============================================================================
 @Composable
 fun TransactionCard(
     transaction: BankTransaction,
@@ -1063,10 +1334,10 @@ fun TransactionCard(
         TransactionType.UNKNOWN -> "نامشخص"
     }
     val icon = when (transaction.type) {
-        TransactionType.DEPOSIT -> Icons.Default.ArrowDownward
-        TransactionType.WITHDRAWAL -> Icons.Default.ArrowUpward
-        TransactionType.INTERNAL -> Icons.Default.SwapHoriz
-        TransactionType.UNKNOWN -> Icons.Default.HelpOutline
+        TransactionType.DEPOSIT -> Icons.Rounded.SouthWest
+        TransactionType.WITHDRAWAL -> Icons.Rounded.NorthEast
+        TransactionType.INTERNAL -> Icons.Rounded.SwapHoriz
+        TransactionType.UNKNOWN -> Icons.Rounded.HelpOutline
     }
 
     Card(
@@ -1090,19 +1361,20 @@ fun TransactionCard(
                         text = "$typeLabel • ${transaction.accountKey}",
                         color = statusColor,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp
+                        style = MaterialTheme.typography.labelLarge
                     )
                 }
-                if (transaction.scope == "BUILDING") {
-                    Surface(color = Color(0xFFE8EAF6), shape = RoundedCornerShape(4.dp)) {
-                        Text(
-                            text = "ساختمان",
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                            fontSize = 10.sp,
-                            color = Color(0xFF1A237E),
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                Surface(
+                    color = if (transaction.scope == "مدیریت ساختمان") Color(0xFFE8EAF6) else Color(0xFFE0F2F1),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(
+                        text = transaction.scope,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF0F2942),
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
 
@@ -1125,21 +1397,17 @@ fun TransactionCard(
                 )
             }
 
-            transaction.balance?.let { bal ->
-                Text(
-                    text = "مانده: ${formatCurrency(bal)} ریال",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.DarkGray
-                )
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                transaction.balance?.let { bal ->
+                    Text(text = "مانده: ${formatCurrency(bal)} ریال", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
+                }
+                if (transaction.payerIdentifier.isNotEmpty()) {
+                    Text(text = "کارت/حساب واریزکننده: ${transaction.payerIdentifier}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF1565C0))
+                }
             }
 
             if (transaction.transferPairInfo.isNotBlank()) {
-                Text(
-                    text = transaction.transferPairInfo,
-                    fontSize = 11.sp,
-                    color = Color(0xFF0277BD),
-                    fontWeight = FontWeight.Medium
-                )
+                Text(text = transaction.transferPairInfo, style = MaterialTheme.typography.labelSmall, color = Color(0xFF0277BD))
             }
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -1153,10 +1421,7 @@ fun TransactionCard(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                     if (transaction.category.isNotBlank()) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.secondaryContainer,
-                            shape = RoundedCornerShape(6.dp)
-                        ) {
+                        Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = RoundedCornerShape(6.dp)) {
                             Text(
                                 text = transaction.category,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
@@ -1170,15 +1435,15 @@ fun TransactionCard(
                         text = when {
                             transaction.userNote.isNotBlank() -> transaction.userNote
                             transaction.category.isNotBlank() -> ""
-                            else -> "برای دسته‌بندی یا ثبت صوتی لمس کنید..."
+                            else -> "برای دسته‌بندی یا ثبت واحد لمس کنید..."
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (transaction.userNote.isNotBlank()) Color(0xFF1A237E) else Color.Gray,
+                        color = if (transaction.userNote.isNotBlank()) Color(0xFF0F2942) else Color.Gray,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                Icon(Icons.Default.Edit, contentDescription = null, tint = Color(0xFF1A237E), modifier = Modifier.size(16.dp))
+                Icon(Icons.Rounded.EditNote, contentDescription = null, tint = Color(0xFF0F2942), modifier = Modifier.size(18.dp))
             }
         }
     }
@@ -1190,7 +1455,7 @@ fun TransactionDetailDialog(
     transaction: BankTransaction,
     categories: List<CategoryEntity>,
     onDismiss: () -> Unit,
-    onSave: (String, String, Boolean?) -> Unit,
+    onSave: (String, String, Boolean?, Boolean) -> Unit,
     onMarkAsNotBankSms: (Boolean) -> Unit,
     onAddNewCategory: (String) -> Unit
 ) {
@@ -1198,15 +1463,14 @@ fun TransactionDetailDialog(
     var noteText by remember { mutableStateOf(transaction.userNote) }
     var selectedCategory by remember { mutableStateOf(transaction.category) }
     var isInternalTransfer by remember { mutableStateOf(transaction.type == TransactionType.INTERNAL) }
+    var assignUnitToAllPayerDeposits by remember { mutableStateOf(transaction.payerIdentifier.isNotEmpty() && transaction.type == TransactionType.DEPOSIT) }
     var showQuickAddCategory by remember { mutableStateOf(false) }
     var quickNewCatName by remember { mutableStateOf("") }
     var showWrongDetectionConfirm by remember { mutableStateOf(false) }
 
-    val sortedCategories = remember(categories, transaction.scope, transaction.type) {
+    val sortedCategories = remember(categories, transaction.type) {
         val isExpense = transaction.type != TransactionType.DEPOSIT
-        categories
-            .filter { it.scope == "ALL" || it.scope == transaction.scope }
-            .sortedByDescending { it.isExpense == isExpense }
+        categories.sortedByDescending { it.isExpense == isExpense }
     }
 
     val voiceLauncher = rememberLauncherForActivityResult(
@@ -1223,7 +1487,7 @@ fun TransactionDetailDialog(
                 )
                 if (suggested != null) {
                     selectedCategory = suggested
-                    Toast.makeText(context, "دسته «$suggested» هوشمندانه انتخاب شد", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "دسته «$suggested» انتخاب شد", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -1233,7 +1497,7 @@ fun TransactionDetailDialog(
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "fa-IR")
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "بگویید بابت چه چیزی هزینه یا واریز شد...")
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "بگویید بابت چه چیزی یا کدام واحد...")
         }
         try {
             voiceLauncher.launch(intent)
@@ -1245,67 +1509,72 @@ fun TransactionDetailDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("ثبت و دسته‌بندی سند", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("ثبت و دسته‌بندی سند", style = MaterialTheme.typography.titleMedium)
                 TextButton(
                     onClick = { showWrongDetectionConfirm = !showWrongDetectionConfirm },
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
                 ) {
-                    Icon(Icons.Default.DeleteOutline, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("بانکی نیست!", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Icon(Icons.Rounded.DeleteForever, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Text("بانکی نیست!", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                 }
             }
         },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                Text("${transaction.accountKey} • ${formatCurrency(transaction.amount)} ریال", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                Text("تاریخ: ${transaction.persianDate}", fontSize = 11.sp, color = Color.Gray)
+                Text("${transaction.accountKey} • ${formatCurrency(transaction.amount)} ریال", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                Text("تاریخ: ${transaction.persianDate}", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Surface(color = Color(0xFFF1F3F4), shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    Text(transaction.rawMessage, modifier = Modifier.padding(8.dp), fontSize = 12.sp)
+                    Text(transaction.rawMessage, modifier = Modifier.padding(8.dp), style = MaterialTheme.typography.bodySmall)
                 }
 
-                // گزینه انتقال بین حساب‌های خودی
+                if (transaction.payerIdentifier.isNotEmpty() && transaction.type == TransactionType.DEPOSIT) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(color = Color(0xFFE3F2FD), shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier
+                                .padding(8.dp)
+                                .clickable { assignUnitToAllPayerDeposits = !assignUnitToAllPayerDeposits },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(checked = assignUnitToAllPayerDeposits, onCheckedChange = { assignUnitToAllPayerDeposits = it })
+                            Text(
+                                text = "اتصال خودکار شماره کارت/حساب «${transaction.payerIdentifier}» به این واحد برای تمام واریزهای قبلی و بعدی",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF0D47A1)
+                            )
+                        }
+                    }
+                }
+
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 6.dp)
+                        .padding(vertical = 4.dp)
                         .clickable { isInternalTransfer = !isInternalTransfer },
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Checkbox(checked = isInternalTransfer, onCheckedChange = { isInternalTransfer = it })
-                    Text("این تراکنش «انتقال بین حساب‌های خودم» است", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    Text("این تراکنش «انتقال بین حساب‌های خودم» است", style = MaterialTheme.typography.bodySmall)
                 }
 
                 if (!isInternalTransfer) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("سرفصل / دسته‌بندی:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text("سرفصل / دسته‌بندی:", style = MaterialTheme.typography.titleSmall)
                         TextButton(onClick = { showQuickAddCategory = !showQuickAddCategory }) {
-                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Text("دسته جدید", fontSize = 12.sp)
+                            Icon(Icons.Rounded.AddCircleOutline, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Text("دسته جدید", style = MaterialTheme.typography.labelSmall)
                         }
                     }
 
                     if (showQuickAddCategory) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(bottom = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
+                        Row(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                             OutlinedTextField(
                                 value = quickNewCatName,
                                 onValueChange = { quickNewCatName = it },
-                                placeholder = { Text("نام دسته جدید...", fontSize = 12.sp) },
+                                placeholder = { Text("نام دسته جدید...", style = MaterialTheme.typography.bodySmall) },
                                 singleLine = true,
                                 modifier = Modifier.weight(1f)
                             )
@@ -1331,7 +1600,7 @@ fun TransactionDetailDialog(
                             FilterChip(
                                 selected = selectedCategory == cat.name,
                                 onClick = { selectedCategory = if (selectedCategory == cat.name) "" else cat.name },
-                                label = { Text(cat.name, fontSize = 11.sp) }
+                                label = { Text(cat.name, style = MaterialTheme.typography.labelSmall) }
                             )
                         }
                     }
@@ -1349,11 +1618,11 @@ fun TransactionDetailDialog(
                             }
                         }
                     },
-                    label = { Text("شرح سند (تایپ یا میکروفون)") },
-                    placeholder = { Text("مثلاً: شارژ واحد ۴ یا بنزین ماشین...") },
+                    label = { Text(if (transaction.scope == "مدیریت ساختمان") "نام واحد یا شرح هزینه" else "شرح سند (تایپ یا میکروفون)") },
+                    placeholder = { Text("مثلاً: واحد ۴ - آقای رضایی یا بنزین...") },
                     trailingIcon = {
                         IconButton(onClick = startVoiceInput) {
-                            Icon(Icons.Default.Mic, contentDescription = "ورودی صوتی", tint = Color(0xFF1A237E))
+                            Icon(Icons.Rounded.Mic, contentDescription = "ورودی صوتی", tint = Color(0xFF0F2942))
                         }
                     },
                     singleLine = true,
@@ -1364,18 +1633,18 @@ fun TransactionDetailDialog(
                     Spacer(modifier = Modifier.height(10.dp))
                     Surface(color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(8.dp)) {
                         Column(modifier = Modifier.padding(10.dp)) {
-                            Text("حذف پیامک اشتباه:", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text("حذف پیامک اشتباه:", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
                             Spacer(modifier = Modifier.height(6.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Button(
                                     onClick = { onMarkAsNotBankSms(false) },
                                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                                     modifier = Modifier.weight(1f)
-                                ) { Text("حذف همین مورد", fontSize = 11.sp) }
+                                ) { Text("حذف همین مورد", style = MaterialTheme.typography.labelSmall) }
                                 OutlinedButton(
                                     onClick = { onMarkAsNotBankSms(true) },
                                     modifier = Modifier.weight(1f)
-                                ) { Text("مسدودی ${transaction.sender}", fontSize = 11.sp) }
+                                ) { Text("مسدودی ${transaction.sender}", style = MaterialTheme.typography.labelSmall) }
                             }
                         }
                     }
@@ -1385,8 +1654,8 @@ fun TransactionDetailDialog(
         confirmButton = {
             Button(onClick = {
                 val transferOverride: Boolean? = if (isInternalTransfer) true else if (transaction.type == TransactionType.INTERNAL) false else null
-                onSave(selectedCategory, noteText.trim(), transferOverride)
-            }) { Text("ثبت سند") }
+                onSave(selectedCategory, noteText.trim(), transferOverride, assignUnitToAllPayerDeposits)
+            }) { Text("ثبت آنی") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("انصراف") }
@@ -1398,16 +1667,15 @@ fun TransactionDetailDialog(
 fun CategoryManagerDialog(
     categories: List<CategoryEntity>,
     onDismiss: () -> Unit,
-    onAddCategory: (String, Boolean, String) -> Unit,
+    onAddCategory: (String, Boolean) -> Unit,
     onDeleteCategory: (String) -> Unit
 ) {
     var newName by remember { mutableStateOf("") }
     var isExpense by remember { mutableStateOf(true) }
-    var scope by remember { mutableStateOf("PERSONAL") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("مدیریت سرفصل‌ها و دسته‌بندی‌ها", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+        title = { Text("مدیریت سرفصل‌ها و دسته‌بندی‌ها", style = MaterialTheme.typography.titleMedium) },
         text = {
             Column {
                 OutlinedTextField(
@@ -1419,77 +1687,31 @@ fun CategoryManagerDialog(
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     RadioButton(selected = isExpense, onClick = { isExpense = true })
-                    Text("هزینه", fontSize = 12.sp)
+                    Text("هزینه", style = MaterialTheme.typography.bodySmall)
                     RadioButton(selected = !isExpense, onClick = { isExpense = false })
-                    Text("درآمد", fontSize = 12.sp)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    FilterChip(
-                        selected = scope == "BUILDING",
-                        onClick = { scope = if (scope == "BUILDING") "PERSONAL" else "BUILDING" },
-                        label = { Text(if (scope == "BUILDING") "مخصوص ساختمان" else "مخصوص شخصی", fontSize = 11.sp) }
-                    )
-                }
-                Button(
-                    onClick = {
+                    Text("درآمد", style = MaterialTheme.typography.bodySmall)
+                    Spacer(modifier = Modifier.weight(1f))
+                    Button(onClick = {
                         val t = newName.trim()
                         if (t.isNotEmpty()) {
-                            onAddCategory(t, isExpense, scope)
+                            onAddCategory(t, isExpense)
                             newName = ""
                         }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("افزودن سرفصل") }
+                    }) { Text("افزودن") }
+                }
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                 LazyColumn(modifier = Modifier.heightIn(max = 220.dp)) {
                     items(categories) { cat ->
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            val scopeLabel = when (cat.scope) {
-                                "BUILDING" -> "ساختمان"
-                                "PERSONAL" -> "شخصی"
-                                else -> "عمومی"
-                            }
-                            Text("${cat.name} ($scopeLabel)", fontSize = 13.sp, modifier = Modifier.weight(1f))
+                            Text("${cat.name} (${if (cat.isExpense) "هزینه" else "درآمد"})", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
                             IconButton(onClick = { onDeleteCategory(cat.name) }, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Default.Delete, contentDescription = null, tint = Color.Red, modifier = Modifier.size(16.dp))
+                                Icon(Icons.Rounded.DeleteOutline, contentDescription = null, tint = Color.Red, modifier = Modifier.size(16.dp))
                             }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("بستن") } }
-    )
-}
-
-@Composable
-fun IgnoredItemsDialog(
-    ignoredItems: List<IgnoredItemEntity>,
-    onDismiss: () -> Unit,
-    onRestoreItem: (String) -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("موارد حذف‌شده و مسدودی‌ها", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
-        text = {
-            if (ignoredItems.isEmpty()) {
-                Text("موردی وجود ندارد.")
-            } else {
-                LazyColumn(modifier = Modifier.heightIn(max = 240.dp)) {
-                    items(ignoredItems) { item ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(item.label.ifEmpty { item.keyId }, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                            TextButton(onClick = { onRestoreItem(item.keyId) }) { Text("بازگردانی", fontSize = 11.sp) }
                         }
                     }
                 }
@@ -1542,7 +1764,9 @@ fun PermissionRequestView(onRequestPermission: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Text("دسترسی به پیامک‌ها و اعلان‌ها", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Icon(Icons.Rounded.Security, contentDescription = null, tint = Color(0xFF0F2942), modifier = Modifier.size(56.dp))
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("دسترسی به پیامک‌ها و اعلان‌ها", style = MaterialTheme.typography.titleLarge)
         Spacer(modifier = Modifier.height(12.dp))
         Text(
             text = "برای استخراج خودکار اسناد بانکی، تفکیک حساب شخصی و ساختمان، کشف مغایرت‌ها و رسم نمودارها، مجوزهای مورد نیاز را تایید کنید.",
@@ -1550,6 +1774,8 @@ fun PermissionRequestView(onRequestPermission: () -> Unit) {
             color = Color.Gray
         )
         Spacer(modifier = Modifier.height(24.dp))
-        Button(onClick = onRequestPermission) { Text("اعطای مجوزهای مورد نیاز") }
+        Button(onClick = onRequestPermission, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F2942))) {
+            Text("اعطای مجوزهای مورد نیاز")
+        }
     }
 }

@@ -106,7 +106,7 @@ class BackgroundSmsReceiver : BroadcastReceiver() {
         )
 
         val typeTitle = if (tx.type == TransactionType.DEPOSIT) "واریز به حساب" else "برداشت از حساب"
-        val title = "$typeTitle (${tx.bankName})"
+        val title = "$typeTitle (${tx.accountKey})"
         val content = "مبلغ: ${formatCurrency(tx.amount)} ریال • برای دسته‌بندی لمس کنید"
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)

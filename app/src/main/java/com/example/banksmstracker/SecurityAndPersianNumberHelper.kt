@@ -36,10 +36,27 @@ object DatabaseSecurityManager {
     private const val KEY_FLAG_SECURE = "flag_secure_enabled"
 
     fun isCredentialsConfigured(context: Context): Boolean {
+        migrateLegacyVaultPrefsIfNeeded(context)
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return !prefs.getString(KEY_USERNAME, null).isNullOrBlank() &&
                 !prefs.getString(KEY_PASS_HASH, null).isNullOrBlank() &&
                 !prefs.getString(KEY_SALT_HEX, null).isNullOrBlank()
+    }
+
+    private fun migrateLegacyVaultPrefsIfNeeded(context: Context) {
+        val v2Prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (!v2Prefs.getString(KEY_PASS_HASH, null).isNullOrBlank()) return
+        val legacyPrefs = context.getSharedPreferences("hamtaraz_secure_vault", Context.MODE_PRIVATE)
+        val lUser = legacyPrefs.getString("db_username", null)
+        val lHash = legacyPrefs.getString("db_pass_hash", null)
+        val lSalt = legacyPrefs.getString("db_salt_hex", null)
+        if (!lUser.isNullOrBlank() && !lHash.isNullOrBlank() && !lSalt.isNullOrBlank()) {
+            v2Prefs.edit()
+                .putString(KEY_USERNAME, lUser)
+                .putString(KEY_PASS_HASH, lHash)
+                .putString(KEY_SALT_HEX, lSalt)
+                .apply()
+        }
     }
 
     fun getSavedUsername(context: Context): String {

@@ -126,10 +126,21 @@ object IranBankSmsParser {
         return when {
             digitsOnly.length >= 15 -> digitsOnly.drop(7).take(7).ifEmpty { digitsOnly.takeLast(7) }
             digitsOnly.length in 10..14 -> digitsOnly.takeLast(7)
-            digitsOnly.length in 4..9 -> digitsOnly
+            digitsOnly.length in 3..9 -> digitsOnly
             rawAccount.contains(".") -> rawAccount.trim()
             else -> "اصلی"
         }
+    }
+
+    /**
+     * بررسی هم‌خوانی انتهای شماره حساب (مثلاً وقتی پیامک فقط چند رقم آخر حساب را نمایش می‌دهد)
+     */
+    fun isAccountDigitsMatch(aDigits: String, bDigits: String): Boolean {
+        if (aDigits.isEmpty() || bDigits.isEmpty()) return false
+        if (aDigits == bDigits) return true
+        val shorter = if (aDigits.length <= bDigits.length) aDigits else bDigits
+        val longer = if (aDigits.length > bDigits.length) aDigits else bDigits
+        return shorter.length >= 3 && longer.endsWith(shorter)
     }
 
     fun buildStableTransactionKey(body: String, amount: Long, balance: Long?, timestamp: Long): String {
@@ -166,7 +177,7 @@ object IranBankSmsParser {
     )
 
     private val labeledAccountRegex = Regex(
-        """(?:حساب|کارت|ش\.حساب|شماره حساب)\s*[:=\-*]?\s*([\d*.\-]*\d[\d*.\-]{2,20})"""
+        """(?:حساب|کارت|ش\.حساب|شماره حساب|انتهای حساب|حساب به شماره)\s*[:=\-*]?\s*([\d*.\-]*\d[\d*.\-]{1,20})"""
     )
 
     private val standaloneAccountRegex = Regex(
@@ -362,7 +373,7 @@ object IranBankSmsParser {
                 ?: accountBankMappings[tx.accountNumber]
                 ?: normalizedMap[core]
                 ?: digitEntries.firstOrNull { (kDigits, _) ->
-                    txDigits.isNotEmpty() && (txDigits == kDigits || txDigits.contains(kDigits) || kDigits.contains(txDigits))
+                    isAccountDigitsMatch(txDigits, kDigits)
                 }?.second
 
             val finalBank = matchedBank ?: tx.bankName
@@ -570,7 +581,11 @@ fun readAllTransactionsFast(
 
     val autoResolvedTxs = rawTransactions.map { tx ->
         if (tx.bankName == "سایر بانک‌ها" && tx.accountNumber != "اصلی") {
+            val txD = tx.rawAccountNumber.replace(Regex("""[^\d]"""), "").ifEmpty { tx.accountNumber.replace(Regex("""[^\d]"""), "") }
             val resolved = knownBankByCore[tx.accountNumber]
+                ?: knownBankByCore.entries.firstOrNull { (k, _) ->
+                    isAccountDigitsMatch(txD, k.replace(Regex("""[^\d]"""), ""))
+                }?.value
             if (resolved != null) {
                 tx.copy(
                     bankName = resolved,
@@ -602,10 +617,21 @@ fun readAllTransactionsFast(
         if (ignoredSmsIds.contains(imp.recordId)) continue
         val impDateOnly = imp.persianDate.substringBefore(" - ").trim()
 
+        val impBank = imp.accountKey.substringBefore(" - ").trim()
+        val impAccDigits = imp.accountKey.substringAfter(" - ", "").replace(Regex("""[^\d]"""), "")
+
+        fun sameAccountOrTail(smsTx: BankTransaction): Boolean {
+            if (smsTx.accountKey == imp.accountKey) return true
+            val smsDigits = smsTx.rawAccountNumber.replace(Regex("""[^\d]"""), "").ifEmpty {
+                smsTx.accountNumber.replace(Regex("""[^\d]"""), "")
+            }
+            return smsTx.bankName == impBank && isAccountDigitsMatch(smsDigits, impAccDigits)
+        }
+
         val exactBalIdx = if (imp.balance != null && imp.balance != 0L) {
             finalTxs.indexOfFirst { smsTx ->
                 !matchedSmsIds.contains(smsTx.id) &&
-                    smsTx.accountKey == imp.accountKey &&
+                    sameAccountOrTail(smsTx) &&
                     smsTx.amount == imp.amount &&
                     smsTx.persianDateOnly == impDateOnly &&
                     smsTx.balance != null && abs(smsTx.balance - imp.balance) <= 10L
@@ -615,7 +641,7 @@ fun readAllTransactionsFast(
         val matchIdx = if (exactBalIdx != -1) exactBalIdx else {
             finalTxs.indexOfFirst { smsTx ->
                 !matchedSmsIds.contains(smsTx.id) &&
-                    smsTx.accountKey == imp.accountKey &&
+                    sameAccountOrTail(smsTx) &&
                     smsTx.amount == imp.amount &&
                     smsTx.persianDateOnly == impDateOnly &&
                     ((smsTx.type == TransactionType.DEPOSIT) == imp.isDeposit)
@@ -629,7 +655,10 @@ fun readAllTransactionsFast(
             val autoMapping = if (mergedPayer.isNotEmpty()) payerMappings[mergedPayer] else null
             val resolvedUnitId = existingSms.unitId ?: autoMapping?.unitId
             val autoUnit = autoMapping?.unitTitle ?: ""
+            val hasRichPayerDetails = imp.description.contains("نام:") || imp.description.contains("کارت/حساب:")
             val mergedNote = when {
+                hasRichPayerDetails && !existingSms.userNote.contains("نام:") ->
+                    if (existingSms.userNote.isNotBlank()) "${existingSms.userNote} • ${imp.description}" else imp.description
                 existingSms.userNote.isNotBlank() && existingSms.userNote != "انتقال وجه بانکی" && existingSms.userNote != "خرید با کارت (کارتخوان)" -> existingSms.userNote
                 autoUnit.isNotBlank() -> autoUnit
                 imp.description.isNotBlank() -> imp.description

@@ -1708,19 +1708,33 @@ fun SettingsAndReconciliationScreen(
     ) { uri ->
         if (uri != null && selectedAccountForExcel.isNotEmpty()) {
             try {
-                val imported = ExcelImporter.parseBankStatementFile(
+                val bankMappingsMap = accountBankMappings.associate { it.rawAccountNumber to it.bankName }
+                val importResult = ExcelImporter.parseBankStatementWithHeader(
                     context = context,
                     uri = uri,
-                    targetAccountKey = selectedAccountForExcel,
+                    fallbackAccountKey = selectedAccountForExcel,
+                    existingProfiles = accountProfiles,
+                    accountBankMappings = bankMappingsMap,
                     existingTransactions = transactions
                 )
+                if (importResult.detectedHeaderAccount.isNotEmpty()) {
+                    val targetBank = importResult.resolvedAccountKey.substringBefore(" - ").trim()
+                    if (targetBank.isNotEmpty() && targetBank != "سایر بانک‌ها") {
+                        onSaveAccountBankMapping(importResult.detectedHeaderAccount, targetBank)
+                    }
+                }
+                val imported = importResult.records
                 if (imported.isEmpty()) {
-                    Toast.makeText(context, "تمام رکوردهای این فایل قبلاً در سیستم وجود داشتند!", Toast.LENGTH_LONG).show()
+                    val accHint = if (importResult.detectedHeaderAccount.isNotEmpty()) " (شماره حساب فایل: ${importResult.detectedHeaderAccount})" else ""
+                    Toast.makeText(context, "تمام رکوردهای این فایل قبلاً در سیستم وجود داشتند!$accHint", Toast.LENGTH_LONG).show()
                 } else {
                     onImportStatementRecords(imported)
-                    Toast.makeText(context, "${imported.size} رکورد جدید از صورت‌حساب اضافه و مغایرت‌ها بررسی شدند!", Toast.LENGTH_LONG).show()
+                    val headerInfo = if (importResult.detectedHeaderAccount.isNotEmpty()) {
+                        " • حساب متصل‌شده: ${importResult.resolvedAccountKey} (${importResult.detectedHeaderAccount})"
+                    } else ""
+                    Toast.makeText(context, "${imported.size} رکورد جدید اضافه و با پیامک‌ها تطبیق داده شد$headerInfo", Toast.LENGTH_LONG).show()
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Toast.makeText(context, "خطا در پردازش فایل: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
             }
         }
@@ -2263,7 +2277,15 @@ fun TransactionCard(
                     Text(text = "مانده: ${formatCurrency(bal)} ریال", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
                 }
                 if (transaction.payerIdentifier.isNotEmpty()) {
-                    Text(text = "کارت/حساب: ${transaction.payerIdentifier}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF1565C0))
+                    Surface(color = Color(0xFFE3F2FD), shape = RoundedCornerShape(6.dp)) {
+                        Text(
+                            text = "واریزکننده/مقصد: ${transaction.payerIdentifier}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF0D47A1),
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
                 }
             }
 
@@ -2452,17 +2474,45 @@ fun TransactionDetailDialog(
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                 // نمایش مجزا و شفافِ «شماره کارت/حساب فرد واریزکننده (از اکسل/پیامک)» در برابر «حساب بانکی شما»
-                if (transaction.payerIdentifier.isNotEmpty()) {
+                val extractedPayerSummary = remember(transaction.userNote, transaction.rawMessage) {
+                    val combined = "${transaction.userNote} | ${transaction.rawMessage}"
+                    val nameMatch = Regex("""(?:نام کامل طرف مقابل|نام طرف مقابل|نام)\s*[:=\-]\s*([^،,|
+)]+)""").find(combined)?.groupValues?.get(1)?.trim()
+                    val bankMatch = Regex("""(?:نام بانک طرف مقابل|بانک)\s*[:=\-]\s*([^،,|
+)]+)""").find(combined)?.groupValues?.get(1)?.trim()
+                    listOfNotNull(
+                        nameMatch?.takeIf { it.isNotEmpty() }?.let { "نام: $it" },
+                        bankMatch?.takeIf { it.isNotEmpty() && it != transaction.bankName }?.let { "بانک مبدا/مقصد: $it" }
+                    ).joinToString(" • ")
+                }
+
+                if (transaction.payerIdentifier.isNotEmpty() || extractedPayerSummary.isNotEmpty()) {
                     Surface(color = Color(0xFFE0F2F1), shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
-                        Column(modifier = Modifier.padding(10.dp)) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Rounded.CreditCard, contentDescription = null, tint = Color(0xFF00695C), modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "کارت / حساب فرد واریزکننده: ${transaction.payerIdentifier}",
-                                    style = MaterialTheme.typography.bodySmall,
+                                    text = "اطلاعات فرد واریزکننده / طرف مقابل",
+                                    style = MaterialTheme.typography.labelMedium,
                                     fontWeight = FontWeight.ExtraBold,
                                     color = Color(0xFF004D40)
+                                )
+                            }
+                            if (extractedPayerSummary.isNotEmpty()) {
+                                Text(
+                                    text = extractedPayerSummary,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF004D40)
+                                )
+                            }
+                            if (transaction.payerIdentifier.isNotEmpty()) {
+                                Text(
+                                    text = "شماره کارت / حساب: ${transaction.payerIdentifier}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF0D47A1)
                                 )
                             }
                             Text(

@@ -893,7 +893,7 @@ fun HolooSmsAccountingApp(
                                     } else tx
                                 }
                                 val profilesMap = accountProfiles.associateBy { it.accountKey }
-                                val mapEntry = mapOf(rawAccKey to chosenBank, coreDigits to chosenBank)
+                                val mapEntry = mapOf(rawAcc to selectedBank, coreDigits to selectedBank)
                     val (recomputedTxs, recomputedProfiles) = IranBankSmsParser.applyAccountBankMappingsInMemory(allTransactions, mapEntry, profilesMap)
                                 allTransactions = recomputedTxs
                                 accountProfiles = recomputedProfiles

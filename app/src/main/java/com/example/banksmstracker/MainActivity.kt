@@ -978,6 +978,9 @@ fun HolooSmsAccountingApp(
                         }
                         recomputedProfiles.forEach { appDao.saveAccountProfile(it) }
                     }
+                    if (selectedAccountFilter != "همه حساب‌ها" && !selectedAccountFilter.startsWith(chosenBank)) {
+                        selectedAccountFilter = "همه حساب‌ها"
+                    }
                     Toast.makeText(context, "شماره حساب به «$chosenBank» متصل شد و تمام پیامک‌های مرتبط به‌روز شدند", Toast.LENGTH_LONG).show()
                 },
                 onSplitBuildingExpense = { generatedCharges ->

@@ -95,7 +95,8 @@ object IranBankSmsParser {
     )
 
     fun normalizePersian(input: String): String {
-        return input
+        val strippedBidi = input.replace(Regex("[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]"), "")
+        return strippedBidi
             .replace('ك', 'ک')
             .replace('ي', 'ی')
             .replace('ى', 'ی')
@@ -144,11 +145,12 @@ object IranBankSmsParser {
         "شناسه قبض", "شناسه پرداخت", "ش ق:", "ش پ:", "مشترک گرامی", "درخواست انشعاب",
         "توزیع نیروی برق", "برق مشهد", "تابلو کنتور", "قبض برق", "قبض گاز", "قبض آب",
         "بدهی پیشین", "بدهی کل", "جشنواره", "قرعه کشی", "وام فوری", "اعتبار هدیه", "تخفیف",
-        "بسته مکالمه", "بسته اینترنت", "شاتل موبایل", "شماره گیری", "سرویس اعتباری", "جیب جت",
+        "بسته مکالمه", "بسته اینترنت", "بسته های اینترنت", "بسته‌های اینترنت", "گیگ",
+        "شاتل موبایل", "shatelmobile", "شماره گیری", "سرویس اعتباری", "جیب جت",
         "بازپرداخت خود را", "تسهیلات به مبلغ", "تشکیل پرونده", "طرح یاقوت",
         "هزینه پیامک ارسالی", "قطع استفاده از سرویس", "عدد 1 را", "لغو 11", "لغو عضویت",
         "elit", "پارک حاشیه", "عوارض پارک", "سفارش شما", "مرسوله", "ارسال شد",
-        "کد رهگیری مرسوله", "پیک", "تخفیف ویژه", "حراج", "بن خرید"
+        "کد رهگیری مرسوله", "پیک", "تخفیف ویژه", "حراج", "بن خرید", "پیشنهاد فقط برای توست"
     )
 
     private val bankingContextRegex = Regex(
@@ -174,10 +176,11 @@ object IranBankSmsParser {
     )
 
     private val transactionPatterns = listOf(
-        Regex("""مبلغ(?:\s+تراکنش)?\s*[:=\-]?\s*([+\-]?[\d,]{3,15})\s*(ریال|تومان)?"""),
-        Regex("""(?:واریز|برداشت|انتقال|خرید)?\s*[:=\-]?\s*([+\-]\s*[\d,]{3,15}|[\d,]{3,15}\s*[+\-])"""),
-        Regex("""([\d,]{3,15})\s*(ریال|تومان)\s*(?:به حساب|از حساب|واریز|برداشت)?"""),
-        Regex("""(?:واریز|برداشت|بستانکار|بدهکار|خرید|پرداخت|کسر از حساب)\s*(?:به|از)?\s*[:=\-]?\s*([\d,]{3,15})""")
+        Regex("""مبلغ(?:\s+تراکنش)?\s*[:=\-]?\s*([+\-]?[\d,]{3,18})\s*(ریال|تومان)?"""),
+        Regex("""(?m)^\s*([+\-]?\s*[\d,]{3,18}\s*[+\-]?)\s*$"""),
+        Regex("""(?:واریز|برداشت|انتقال|خرید)?\s*[:=\-]?\s*([+\-]\s*[\d,]{3,18}|[\d,]{3,18}\s*[+\-])"""),
+        Regex("""([\d,]{3,18})\s*(ریال|تومان)\s*(?:به حساب|از حساب|واریز|برداشت)?"""),
+        Regex("""(?:واریز|برداشت|بستانکار|بدهکار|خرید|پرداخت|کسر از حساب)\s*(?:به|از)?\s*[:=\-]?\s*([\d,]{3,18})""")
     )
 
     private val withdrawalCuesRegex = Regex("""(?:برداشت|بدهکار|خرید|کسر|پرداخت|از حساب شما برداشت|انتقال به|واریز به|حواله به|\-\s*[\d,]+|[\d,]+\s*\-)""")
@@ -255,15 +258,11 @@ object IranBankSmsParser {
         if (type == TransactionType.UNKNOWN) return null
 
         val bankName = detectBankName(sender, body)
+        // برای جلوگیری از شناسایی پیامک‌های تبلیغاتی/بسته‌های اینترنتی، وجود مانده/موجودی یا شناسایی بانک/حساب/علامت تراکنش الزامی است
         val hasBankingAnchor = bankName != "سایر بانک‌ها" ||
                 balanceAmount != null ||
-                rawAcc.isNotEmpty() ||
+                (rawAcc.isNotEmpty() && body.contains("حساب")) ||
                 cleanPayer.isNotEmpty() ||
-                body.contains("مانده") ||
-                body.contains("موجودی") ||
-                body.contains("حساب") ||
-                body.contains("کارت") ||
-                body.contains("انتقال") ||
                 matchedSign.isNotEmpty()
         if (!hasBankingAnchor) return null
         val accountKey = if (cleanAcc == "اصلی") "$bankName - اصلی" else "$bankName - $cleanAcc"
@@ -346,13 +345,22 @@ object IranBankSmsParser {
         existingProfiles: Map<String, AccountProfileEntity>
     ): Pair<List<BankTransaction>, List<AccountProfileEntity>> {
         val normalizedMap = accountBankMappings.mapKeys { (k, _) -> extractAccountCore(k) }
+        val digitEntries = accountBankMappings.mapNotNull { (k, v) ->
+            val d = k.replace(Regex("[^\d]"), "")
+            if (d.length >= 4) d to v else null
+        }
         val updatedProfiles = existingProfiles.toMutableMap()
 
         val updatedTxs = txList.map { tx ->
-            val core = extractAccountCore(tx.rawAccountNumber.ifBlank { tx.accountNumber })
-            val matchedBank = accountBankMappings[tx.rawAccountNumber]
+            val rawClean = tx.rawAccountNumber.trim()
+            val txDigits = rawClean.replace(Regex("[^\d]"), "").ifEmpty { tx.accountNumber.replace(Regex("[^\d]"), "") }
+            val core = extractAccountCore(rawClean.ifBlank { tx.accountNumber })
+            val matchedBank = accountBankMappings[rawClean]
                 ?: accountBankMappings[tx.accountNumber]
                 ?: normalizedMap[core]
+                ?: digitEntries.firstOrNull { (kDigits, _) ->
+                    txDigits.isNotEmpty() && (txDigits == kDigits || txDigits.contains(kDigits) || kDigits.contains(txDigits))
+                }?.second
 
             val finalBank = matchedBank ?: tx.bankName
             val finalAccNum = if (core != "اصلی") core else tx.accountNumber

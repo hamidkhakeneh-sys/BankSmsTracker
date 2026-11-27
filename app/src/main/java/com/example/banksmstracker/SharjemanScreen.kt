@@ -1344,7 +1344,7 @@ fun ManualFundEntryDialog(
                 ) {
                     Icon(Icons.Rounded.AddAPhoto, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (receiptPath.isEmpty()) "اضافه کردن پیوست (تصویر فاکتور)" else "تصویر پیوست شد (${ImageReceiptHelper.getFileSizeKb(receiptPath)} KB)", style = MaterialTheme.typography.labelSmall)
+                    Text(if (receiptPath.isEmpty()) "اضافه کردن پیوست (تصویر فاکتور)" else "تصویر پیوست شد (${ImageReceiptHelper.getFileSizeKb(context, receiptPath)} KB)", style = MaterialTheme.typography.labelSmall)
                 }
                 OutlinedTextField(
                     value = note,
@@ -1902,7 +1902,7 @@ fun BuildingExpenseWithSplitDialog(
                 ) {
                     Icon(Icons.Rounded.AddAPhoto, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (receiptPath.isEmpty()) "پیوست تصویر فاکتور (کم‌حجم)" else "تصویر پیوست شد (${ImageReceiptHelper.getFileSizeKb(receiptPath)} KB)", style = MaterialTheme.typography.labelSmall)
+                    Text(if (receiptPath.isEmpty()) "پیوست تصویر فاکتور (کم‌حجم)" else "تصویر پیوست شد (${ImageReceiptHelper.getFileSizeKb(context, receiptPath)} KB)", style = MaterialTheme.typography.labelSmall)
                 }
 
                 OutlinedTextField(

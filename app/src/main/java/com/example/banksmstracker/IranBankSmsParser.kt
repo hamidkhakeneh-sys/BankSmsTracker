@@ -140,7 +140,23 @@ object IranBankSmsParser {
         if (aDigits == bDigits) return true
         val shorter = if (aDigits.length <= bDigits.length) aDigits else bDigits
         val longer = if (aDigits.length > bDigits.length) aDigits else bDigits
-        return shorter.length >= 3 && longer.endsWith(shorter)
+        return shorter.length >= 3 && (longer.endsWith(shorter) || shorter.endsWith(longer.takeLast(minOf(longer.length, shorter.length))))
+    }
+
+    /**
+     * بررسی برابری آخرین ارقام شماره حساب (مثلاً ۴ تا ۸ رقم آخر) برای اتصال خودکار حساب‌ها و پیامک‌ها به بانک
+     */
+    fun matchesLastDigits(aRaw: String, bRaw: String, tailLengths: List<Int> = listOf(8, 7, 6, 5, 4)): Boolean {
+        val a = aRaw.replace(Regex("""[^\d]"""), "")
+        val b = bRaw.replace(Regex("""[^\d]"""), "")
+        if (a.length < 4 || b.length < 4) return false
+        if (a == b) return true
+        for (len in tailLengths) {
+            if (a.length >= len && b.length >= len && a.takeLast(len) == b.takeLast(len)) {
+                return true
+            }
+        }
+        return a.endsWith(b) || b.endsWith(a)
     }
 
     fun buildStableTransactionKey(body: String, amount: Long, balance: Long?, timestamp: Long): String {
@@ -161,7 +177,9 @@ object IranBankSmsParser {
         "بازپرداخت خود را", "تسهیلات به مبلغ", "تشکیل پرونده", "طرح یاقوت",
         "هزینه پیامک ارسالی", "قطع استفاده از سرویس", "عدد 1 را", "لغو 11", "لغو عضویت",
         "elit", "پارک حاشیه", "عوارض پارک", "سفارش شما", "مرسوله", "ارسال شد",
-        "کد رهگیری مرسوله", "پیک", "تخفیف ویژه", "حراج", "بن خرید", "پیشنهاد فقط برای توست"
+        "کد رهگیری مرسوله", "پیک", "تخفیف ویژه", "حراج", "بن خرید", "پیشنهاد فقط برای توست",
+        "دوره سرویس", "اطلاع‌رسانی پیامکی", "تمدید می‌شود", "تمدید می شود",
+        "کسر خواهد شد", "برای لغو", "به پایان می‌رسد", "به پایان می رسد", "سرویس پیامک"
     )
 
     private val bankingContextRegex = Regex(

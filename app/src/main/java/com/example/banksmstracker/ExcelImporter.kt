@@ -2,10 +2,16 @@ package com.example.banksmstracker
 
 import android.content.Context
 import android.net.Uri
+import android.util.Xml
+import jxl.Workbook
+import jxl.WorkbookSettings
+import org.xmlpull.v1.XmlPullParser
 import saman.zamani.persiandate.PersianDate
 import java.io.BufferedReader
+import java.io.ByteArrayInputStream
 import java.io.InputStreamReader
 import java.nio.charset.Charset
+import java.util.zip.ZipInputStream
 
 data class StatementImportResult(
     val detectedHeaderAccount: String = "",
@@ -62,9 +68,29 @@ object ExcelImporter {
 
     private fun extractRowsFromStatementBytes(context: Context, uri: Uri): List<List<String>> {
         val rawBytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return emptyList()
-        if (rawBytes.isEmpty()) return emptyList()
+        if (rawBytes.size < 4) return emptyList()
 
-        // تشخیص خودکار UTF-8 در برابر Windows-1256 (خروجی‌های فارسی بانک‌ها و همراه بام)
+        // ۱. تشخیص فرمت باینری اکسل ۹۷-۲۰۰۳ (OLE2 BIFF8 با هدر D0 CF 11 E0 - خروجی همراه بام و بانک ملی)
+        val isOle2Xls = (rawBytes[0].toInt() and 0xFF) == 0xD0 &&
+                (rawBytes[1].toInt() and 0xFF) == 0xCF &&
+                (rawBytes[2].toInt() and 0xFF) == 0x11 &&
+                (rawBytes[3].toInt() and 0xFF) == 0xE0
+        if (isOle2Xls) {
+            val xlsRows = extractRowsFromBinaryXls(rawBytes)
+            if (xlsRows.isNotEmpty()) return xlsRows
+        }
+
+        // ۲. تشخیص فرمت اکسل مدرن XLSX (فایل ZIP با هدر 50 4B 03 04) با تجزیه‌گر بومی اندروید XmlPullParser
+        val isZipXlsx = (rawBytes[0].toInt() and 0xFF) == 0x50 &&
+                (rawBytes[1].toInt() and 0xFF) == 0x4B &&
+                (rawBytes[2].toInt() and 0xFF) == 0x03 &&
+                (rawBytes[3].toInt() and 0xFF) == 0x04
+        if (isZipXlsx) {
+            val xlsxRows = extractRowsFromXlsxNative(rawBytes)
+            if (xlsxRows.isNotEmpty()) return xlsxRows
+        }
+
+        // ۳. رمزگشایی متنی UTF-8 یا Windows-1256 برای جدول‌های HTML و فایل‌های CSV
         val decodedText = try {
             val utf8Str = String(rawBytes, Charsets.UTF_8)
             if (utf8Str.contains('\uFFFD')) {
@@ -76,7 +102,6 @@ object ExcelImporter {
             String(rawBytes, Charsets.UTF_8)
         }
 
-        // پشتیبانی از فایل‌های XLS مبتنی بر جدول HTML (خروجی رایج اینترنت‌بانک و همراه بام)
         val lowerSample = decodedText.take(2048).lowercase()
         if (lowerSample.contains("<table") || lowerSample.contains("<tr") || lowerSample.contains("<html")) {
             val htmlRows = extractRowsFromHtmlTable(decodedText)
@@ -92,6 +117,169 @@ object ExcelImporter {
             }
         }
         return allRows
+    }
+
+    /**
+     * خواندن مستقیم فایل‌های باینری .xls (مثل خروجی همراه بام بانک ملی) با JExcelAPI
+     */
+    private fun extractRowsFromBinaryXls(rawBytes: ByteArray): List<List<String>> {
+        val rows = mutableListOf<List<String>>()
+        var workbook: Workbook? = null
+        try {
+            val settings = WorkbookSettings().apply {
+                suppressWarnings = true
+                encoding = "UTF-8"
+            }
+            workbook = Workbook.getWorkbook(ByteArrayInputStream(rawBytes), settings)
+            if (workbook.numberOfSheets > 0) {
+                val sheet = workbook.getSheet(0)
+                for (r in 0 until sheet.rows) {
+                    val rowCells = mutableListOf<String>()
+                    for (c in 0 until sheet.columns) {
+                        val content = sheet.getCell(c, r).contents ?: ""
+                        rowCells.add(IranBankSmsParser.normalizePersian(content.trim()))
+                    }
+                    if (rowCells.any { it.isNotBlank() }) {
+                        rows.add(rowCells)
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+        } finally {
+            try {
+                workbook?.close()
+            } catch (_: Throwable) { }
+        }
+        return rows
+    }
+
+    /**
+     * خواندن بومی فایل‌های .xlsx بدون وابستگی به POI یا java.awt با استفاده از ZipInputStream و XmlPullParser اندروید
+     */
+    private fun extractRowsFromXlsxNative(rawBytes: ByteArray): List<List<String>> {
+        val sharedStrings = mutableListOf<String>()
+        var sheetXmlBytes: ByteArray? = null
+
+        ZipInputStream(ByteArrayInputStream(rawBytes)).use { zis ->
+            var entry = zis.nextEntry
+            while (entry != null) {
+                when (entry.name) {
+                    "xl/sharedStrings.xml" -> {
+                        val xmlBytes = zis.readBytes()
+                        sharedStrings.addAll(parseSharedStringsXml(xmlBytes))
+                    }
+                    "xl/worksheets/sheet1.xml" -> {
+                        sheetXmlBytes = zis.readBytes()
+                    }
+                }
+                zis.closeEntry()
+                entry = zis.nextEntry
+            }
+        }
+
+        val sheetBytes = sheetXmlBytes ?: return emptyList()
+        return parseWorksheetXml(sheetBytes, sharedStrings)
+    }
+
+    private fun parseSharedStringsXml(xmlBytes: ByteArray): List<String> {
+        val list = mutableListOf<String>()
+        val parser = Xml.newPullParser()
+        parser.setInput(ByteArrayInputStream(xmlBytes), "UTF-8")
+        var event = parser.eventType
+        var inSi = false
+        val sb = StringBuilder()
+        while (event != XmlPullParser.END_DOCUMENT) {
+            when (event) {
+                XmlPullParser.START_TAG -> {
+                    if (parser.name == "si") {
+                        inSi = true
+                        sb.clear()
+                    }
+                }
+                XmlPullParser.TEXT -> {
+                    if (inSi) sb.append(parser.text ?: "")
+                }
+                XmlPullParser.END_TAG -> {
+                    if (parser.name == "si") {
+                        list.add(IranBankSmsParser.normalizePersian(sb.toString().trim()))
+                        inSi = false
+                    }
+                }
+            }
+            event = parser.next()
+        }
+        return list
+    }
+
+    private fun parseWorksheetXml(xmlBytes: ByteArray, sharedStrings: List<String>): List<List<String>> {
+        val rows = mutableListOf<List<String>>()
+        val parser = Xml.newPullParser()
+        parser.setInput(ByteArrayInputStream(xmlBytes), "UTF-8")
+        var event = parser.eventType
+        var currentRow = mutableMapOf<Int, String>()
+        var currentColIdx = 0
+        var cellType = ""
+        var inValue = false
+        val valBuilder = StringBuilder()
+
+        while (event != XmlPullParser.END_DOCUMENT) {
+            when (event) {
+                XmlPullParser.START_TAG -> {
+                    when (parser.name) {
+                        "row" -> currentRow = mutableMapOf()
+                        "c" -> {
+                            cellType = parser.getAttributeValue(null, "t") ?: ""
+                            val ref = parser.getAttributeValue(null, "r") ?: ""
+                            currentColIdx = columnRefToIndex(ref, currentRow.size)
+                            valBuilder.clear()
+                        }
+                        "v", "t" -> {
+                            inValue = true
+                            valBuilder.clear()
+                        }
+                    }
+                }
+                XmlPullParser.TEXT -> {
+                    if (inValue) valBuilder.append(parser.text ?: "")
+                }
+                XmlPullParser.END_TAG -> {
+                    when (parser.name) {
+                        "v", "t" -> inValue = false
+                        "c" -> {
+                            val rawVal = valBuilder.toString().trim()
+                            val resolved = if (cellType == "s") {
+                                val idx = rawVal.toIntOrNull()
+                                if (idx != null && idx in sharedStrings.indices) sharedStrings[idx] else rawVal
+                            } else {
+                                IranBankSmsParser.normalizePersian(rawVal)
+                            }
+                            currentRow[currentColIdx] = resolved
+                        }
+                        "row" -> {
+                            if (currentRow.isNotEmpty()) {
+                                val maxCol = currentRow.keys.maxOrNull() ?: 0
+                                val rowList = (0..maxCol).map { currentRow[it] ?: "" }
+                                if (rowList.any { it.isNotBlank() }) {
+                                    rows.add(rowList)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            event = parser.next()
+        }
+        return rows
+    }
+
+    private fun columnRefToIndex(cellRef: String, fallback: Int): Int {
+        val letters = cellRef.takeWhile { it.isLetter() }.uppercase()
+        if (letters.isEmpty()) return fallback
+        var col = 0
+        for (ch in letters) {
+            col = col * 26 + (ch.code - 'A'.code + 1)
+        }
+        return (col - 1).coerceAtLeast(0)
     }
 
     private fun extractRowsFromHtmlTable(html: String): List<List<String>> {
@@ -129,7 +317,6 @@ object ExcelImporter {
     ): StatementImportResult {
         val newRecords = mutableListOf<ImportedRecordEntity>()
 
-        // ۱. استخراج خودکار شماره حساب و نام صاحب حساب از هدر صورت‌حساب (مانند ردیف ۳ همراه بام: شماره حساب: 0305931442007)
         var detectedHeaderAccount = ""
         var detectedOwnerName = ""
         var headerRowIndex = -1
@@ -146,7 +333,7 @@ object ExcelImporter {
 
         for (i in rows.indices) {
             val cols = rows[i]
-            if (headerRowIndex == -1 && i < 12) {
+            if (headerRowIndex == -1 && i < 15) {
                 for (cIdx in cols.indices) {
                     val cell = cols[cIdx].trim()
                     if (cell.contains("شماره حساب")) {
@@ -192,7 +379,6 @@ object ExcelImporter {
             }
         }
 
-        // ۲. اتصال خودکار شماره حساب هدر فایل به حساب بانکی متناظر در برنامه
         val resolvedAccountKey = resolveTargetAccountKey(
             detectedHeaderAccount = detectedHeaderAccount,
             fallbackAccountKey = fallbackAccountKey,
@@ -253,7 +439,6 @@ object ExcelImporter {
 
             val combinedFullText = listOf(descPart, detailsPart, extraPart).filter { it.isNotBlank() }.joinToString(" | ")
 
-            // ۳. استخراج کامل اطلاعات واریزکننده / طرف مقابل (شماره کارت + نام کامل + نام بانک طرف مقابل)
             val counterCard = counterCardRegex.find(combinedFullText)?.groupValues?.get(1)?.trim()
                 ?: pan16CardRegex.find(combinedFullText)?.groupValues?.get(1)?.trim()
                 ?: fallbackCardRegex.find(combinedFullText)?.groupValues?.get(1)?.trim()
@@ -310,7 +495,6 @@ object ExcelImporter {
         if (detectedHeaderAccount.isBlank()) return fallbackAccountKey
         val headerCore = IranBankSmsParser.extractAccountCore(detectedHeaderAccount)
 
-        // الف) جستجو در پروفایل‌های حساب موجود (شامل حالتی که پیامک فقط انتهای شماره حساب را نشان داده است)
         val matchedProfile = existingProfiles.firstOrNull { prof ->
             val pDigits = prof.accountNumber.replace(Regex("""[^\d]"""), "")
             pDigits.isNotEmpty() && (
@@ -320,7 +504,6 @@ object ExcelImporter {
         }
         if (matchedProfile != null) return matchedProfile.accountKey
 
-        // ب) جستجو در نگاشت‌های دستی شماره حساب به بانک
         val mappedBank = accountBankMappings[detectedHeaderAccount]
             ?: accountBankMappings[headerCore]
             ?: accountBankMappings.entries.firstOrNull { (k, _) ->
@@ -332,7 +515,6 @@ object ExcelImporter {
             return IranBankSmsParser.buildStableAccountKey(mappedBank, headerCore)
         }
 
-        // ج) اگر کاربر حسابی با بانک مشخص انتخاب کرده، شماره حساب هدر را به همان بانک پیوند می‌دهیم
         val fallbackBank = fallbackAccountKey.substringBefore(" - ").trim()
         if (fallbackBank.isNotEmpty() && fallbackBank != "سایر بانک‌ها") {
             return IranBankSmsParser.buildStableAccountKey(fallbackBank, headerCore)

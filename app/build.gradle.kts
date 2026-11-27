@@ -13,8 +13,8 @@ android {
         applicationId = "com.example.banksmstracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 37
-        versionName = "37.0-Enterprise"
+        versionCode = 39
+        versionName = "39.0-Enterprise"
     }
 
     buildTypes {
@@ -76,4 +76,7 @@ dependencies {
 
     // EXIF orientation handling for receipt images
     implementation("androidx.exifinterface:exifinterface:1.3.7")
+
+    // Pure-Java Excel reader for binary .xls (BIFF8 OLE2) and .xlsx (OOXML ZIP) without java.awt/StAX dependencies
+    implementation("net.sourceforge.jexcelapi:jxl:2.6.12")
 }

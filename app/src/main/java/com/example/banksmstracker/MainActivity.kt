@@ -949,39 +949,44 @@ fun HolooSmsAccountingApp(
                 onAssignAccountToBank = { rawAccKey, chosenBank ->
                     selectedTransaction = null
                     val rawDigits = rawAccKey.replace(Regex("""[^\d]"""), "")
-                    val coreDigits = if (rawDigits.length >= 15) rawDigits.drop(7).take(7) else rawDigits.takeLast(7)
+                    val coreDigits = IranBankSmsParser.extractAccountCore(rawAccKey)
+                    val tail4 = if (rawDigits.length >= 4) rawDigits.takeLast(4) else rawDigits
+                    val tail6 = if (rawDigits.length >= 6) rawDigits.takeLast(6) else rawDigits
 
-                    // ۱. به‌روزرسانی فوری در حافظه زنده (0ms) تا کاربر بلافاصله تغییر بانک و گروه‌بندی را ببیند
-                    val updatedRawList = allTransactions.map { tx ->
-                        val txDigits = tx.rawAccountNumber.replace(Regex("""[^\d]"""), "")
-                        val matchesAcc = (rawAccKey.isNotEmpty() && tx.rawAccountNumber == rawAccKey) ||
-                                (coreDigits.isNotEmpty() && (tx.accountNumber == coreDigits || txDigits.contains(coreDigits))) ||
-                                (rawDigits.isNotEmpty() && txDigits == rawDigits)
-                        if (matchesAcc) {
-                            tx.copy(
-                                bankName = chosenBank,
-                                accountKey = "$chosenBank - ${tx.accountNumber}"
-                            )
-                        } else tx
-                    }
+                    val matchedRawAccounts = allTransactions
+                        .mapNotNull { tx ->
+                            val cand = tx.rawAccountNumber.ifBlank { tx.accountNumber }
+                            val candDigits = cand.replace(Regex("""[^\d]"""), "")
+                            if (candDigits.isNotEmpty() && IranBankSmsParser.matchesLastDigits(rawDigits, candDigits)) cand else null
+                        }
+                        .distinct()
+
                     val profilesMap = accountProfiles.associateBy { it.accountKey }
-                    val mapEntry = mapOf(rawAccKey to chosenBank, coreDigits to chosenBank)
+                    val mapEntry = buildMap<String, String> {
+                        if (rawAccKey.isNotBlank()) put(rawAccKey, chosenBank)
+                        if (rawDigits.isNotEmpty()) put(rawDigits, chosenBank)
+                        if (coreDigits.isNotBlank() && coreDigits != "اصلی") put(coreDigits, chosenBank)
+                        if (tail4.length >= 4) put(tail4, chosenBank)
+                        if (tail6.length >= 6) put(tail6, chosenBank)
+                        matchedRawAccounts.forEach { put(it, chosenBank) }
+                    }
+
                     val (recomputedTxs, recomputedProfiles) = IranBankSmsParser.applyAccountBankMappingsInMemory(allTransactions, mapEntry, profilesMap)
                     allTransactions = recomputedTxs
                     accountProfiles = recomputedProfiles
 
-                    // ۲. ذخیره دائمی در دیتابیس
                     coroutineScope.launch(Dispatchers.IO) {
-                        appDao.saveAccountBankMapping(AccountBankMappingEntity(rawAccKey, chosenBank))
-                        if (coreDigits.isNotEmpty() && coreDigits != rawAccKey) {
-                            appDao.saveAccountBankMapping(AccountBankMappingEntity(coreDigits, chosenBank))
+                        mapEntry.keys.forEach { keyStr ->
+                            if (keyStr.isNotBlank()) {
+                                appDao.saveAccountBankMapping(AccountBankMappingEntity(keyStr, chosenBank))
+                            }
                         }
                         recomputedProfiles.forEach { appDao.saveAccountProfile(it) }
                     }
                     if (selectedAccountFilter != "همه حساب‌ها" && !selectedAccountFilter.startsWith(chosenBank)) {
                         selectedAccountFilter = "همه حساب‌ها"
                     }
-                    Toast.makeText(context, "شماره حساب به «$chosenBank» متصل شد و تمام پیامک‌های مرتبط به‌روز شدند", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "حساب و موارد هم‌شماره (ارقام پایانی مشترک) به «$chosenBank» متصل شدند", Toast.LENGTH_LONG).show()
                 },
                 onSplitBuildingExpense = { generatedCharges ->
                     coroutineScope.launch(Dispatchers.IO) {
@@ -1725,8 +1730,8 @@ fun SettingsAndReconciliationScreen(
                 }
                 val imported = importResult.records
                 if (imported.isEmpty()) {
-                    val accHint = if (importResult.detectedHeaderAccount.isNotEmpty()) " (شماره حساب فایل: ${importResult.detectedHeaderAccount})" else ""
-                    Toast.makeText(context, "تمام رکوردهای این فایل قبلاً در سیستم وجود داشتند!$accHint", Toast.LENGTH_LONG).show()
+                    val accHint = if (importResult.detectedHeaderAccount.isNotEmpty()) " • شماره حساب فایل: ${importResult.detectedHeaderAccount}" else ""
+                    Toast.makeText(context, "رکورد جدیدی از فایل استخراج نشد (یا قبلاً ثبت شده است)$accHint", Toast.LENGTH_LONG).show()
                 } else {
                     onImportStatementRecords(imported)
                     val headerInfo = if (importResult.detectedHeaderAccount.isNotEmpty()) {
@@ -2486,44 +2491,44 @@ fun TransactionDetailDialog(
                     ).joinToString(" • ")
                 }
 
-                if (transaction.payerIdentifier.isNotEmpty() || extractedPayerSummary.isNotEmpty()) {
-                    Surface(color = Color(0xFFE0F2F1), shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
-                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Rounded.CreditCard, contentDescription = null, tint = Color(0xFF00695C), modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "اطلاعات فرد واریزکننده / طرف مقابل",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color(0xFF004D40)
-                                )
-                            }
-                            if (extractedPayerSummary.isNotEmpty()) {
-                                Text(
-                                    text = extractedPayerSummary,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF004D40)
-                                )
-                            }
-                            if (transaction.payerIdentifier.isNotEmpty()) {
-                                Text(
-                                    text = "شماره کارت / حساب: ${transaction.payerIdentifier}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFF0D47A1)
-                                )
-                            }
+                Surface(color = Color(0xFFE0F2F1), shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.CreditCard, contentDescription = null, tint = Color(0xFF00695C), modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "مبلغ: ${formatCurrency(transaction.amount)} ریال (${formatCurrency(transaction.amount / 10)} تومان) • تاریخ: ${transaction.persianDate}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF00695C)
+                                text = "اطلاعات واریزکننده / فرستنده و تراکنش",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFF004D40)
                             )
                         }
+                        if (extractedPayerSummary.isNotEmpty()) {
+                            Text(
+                                text = extractedPayerSummary,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF004D40)
+                            )
+                        }
+                        Text(
+                            text = if (transaction.payerIdentifier.isNotEmpty()) {
+                                "شماره کارت / حساب واریزکننده: ${transaction.payerIdentifier}"
+                            } else {
+                                "شماره کارت/حساب واریزکننده در متن: ثبت نشده • سرشماره/منبع: ${transaction.sender}"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF0D47A1)
+                        )
+                        Text(
+                            text = "مبلغ: ${formatCurrency(transaction.amount)} ریال (${formatCurrency(transaction.amount / 10)} تومان) • تاریخ: ${transaction.persianDate}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF00695C)
+                        )
                     }
-                    Spacer(modifier = Modifier.height(6.dp))
-                } else {
+                }
+                Spacer(modifier = Modifier.height(6.dp)) else {
                     Text(
                         text = "${formatCurrency(transaction.amount)} ریال (${formatCurrency(transaction.amount / 10)} تومان)",
                         fontWeight = FontWeight.Bold,

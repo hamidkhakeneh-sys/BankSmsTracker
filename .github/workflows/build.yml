@@ -19,6 +19,13 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Prepare consistent debug keystore
+        run: |
+          mkdir -p $HOME/.android
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -keystore $HOME/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=HamTaraz Debug,O=HamTaraz,C=IR"
+          fi
+
       - name: Accept Android SDK Licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
@@ -27,13 +34,11 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build Debug & Release APKs
+      - name: Build Debug APK
         run: gradle assembleDebug --stacktrace
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: HamTaraz-Enterprise-v37-APKs
-          path: |
-            app/build/outputs/apk/debug/app-debug.apk
-            app/build/outputs/apk/release/app-release-unsigned.apk
+          name: HamTaraz-Enterprise-v39-APKs
+          path: app/build/outputs/apk/debug/app-debug.apk

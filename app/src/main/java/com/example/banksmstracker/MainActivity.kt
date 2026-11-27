@@ -893,7 +893,7 @@ fun HolooSmsAccountingApp(
                                     } else tx
                                 }
                                 val profilesMap = accountProfiles.associateBy { it.accountKey }
-                                val mapEntry = mapOf(rawAccKey to chosenBank, coreDigits to chosenBank)
+                                val mapEntry = mapOf(rawAcc to selectedBank, coreDigits to selectedBank)
                     val (recomputedTxs, recomputedProfiles) = IranBankSmsParser.applyAccountBankMappingsInMemory(allTransactions, mapEntry, profilesMap)
                                 allTransactions = recomputedTxs
                                 accountProfiles = recomputedProfiles
@@ -965,7 +965,7 @@ fun HolooSmsAccountingApp(
                         } else tx
                     }
                     val profilesMap = accountProfiles.associateBy { it.accountKey }
-                    val mapEntry = mapOf(rawAccKey to chosenBank, coreDigits to chosenBank)
+                    val mapEntry = mapOf(rawAcc to selectedBank, coreDigits to selectedBank)
                     val (recomputedTxs, recomputedProfiles) = IranBankSmsParser.applyAccountBankMappingsInMemory(allTransactions, mapEntry, profilesMap)
                     allTransactions = recomputedTxs
                     accountProfiles = recomputedProfiles
@@ -2393,7 +2393,7 @@ fun TransactionDetailDialog(
             val savedPath = ImageReceiptHelper.compressAndSaveReceipt(context, uri, transaction.id)
             if (savedPath != null) {
                 receiptPath = savedPath
-                val kb = ImageReceiptHelper.getFileSizeKb(savedPath)
+                val kb = ImageReceiptHelper.getFileSizeKb(context, savedPath)
                 Toast.makeText(context, "تصویر سند با حجم کم ($kb کیلوبایت) پیوست شد", Toast.LENGTH_SHORT).show()
             }
         }
@@ -2826,7 +2826,7 @@ fun TransactionDetailDialog(
                     Icon(Icons.Rounded.AddAPhoto, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (receiptPath.isEmpty()) "پیوست تصویر فاکتور / رسید (فشرده‌سازی خودکار)" else "تغییر تصویر پیوست‌شده (${ImageReceiptHelper.getFileSizeKb(receiptPath)} KB)",
+                        text = if (receiptPath.isEmpty()) "پیوست تصویر فاکتور / رسید (فشرده‌سازی خودکار)" else "تغییر تصویر پیوست‌شده (${ImageReceiptHelper.getFileSizeKb(context, receiptPath)} KB)",
                         style = MaterialTheme.typography.labelMedium
                     )
                 }

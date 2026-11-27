@@ -139,15 +139,20 @@ object IranBankSmsParser {
     }
 
     private val nonTransactionKeywords = listOf(
-        "رمز پویا", "اعتبار این رمز", "کد تایید", "کد ورود",
+        "رمز پویا", "اعتبار این رمز", "کد تایید", "کد ورود", "کد یکبار مصرف", "otp",
         "صورتحساب", "صورت حساب", "مهلت پرداخت", "قابل پرداخت", "باقی مانده هزینه",
         "شناسه قبض", "شناسه پرداخت", "ش ق:", "ش پ:", "مشترک گرامی", "درخواست انشعاب",
-        "توزیع نیروی برق", "برق مشهد", "تابلو کنتور",
-        "بدهی پیشین", "بدهی کل", "جشنواره", "قرعه کشی", "وام فوری",
-        "بسته مکالمه", "شاتل موبایل", "شماره گیری", "سرویس اعتباری", "جیب جت",
+        "توزیع نیروی برق", "برق مشهد", "تابلو کنتور", "قبض برق", "قبض گاز", "قبض آب",
+        "بدهی پیشین", "بدهی کل", "جشنواره", "قرعه کشی", "وام فوری", "اعتبار هدیه", "تخفیف",
+        "بسته مکالمه", "بسته اینترنت", "شاتل موبایل", "شماره گیری", "سرویس اعتباری", "جیب جت",
         "بازپرداخت خود را", "تسهیلات به مبلغ", "تشکیل پرونده", "طرح یاقوت",
-        "هزینه پیامک ارسالی", "قطع استفاده از سرویس", "عدد 1 را",
-        "elit", "پارک حاشیه", "عوارض پارک"
+        "هزینه پیامک ارسالی", "قطع استفاده از سرویس", "عدد 1 را", "لغو 11", "لغو عضویت",
+        "elit", "پارک حاشیه", "عوارض پارک", "سفارش شما", "مرسوله", "ارسال شد",
+        "کد رهگیری مرسوله", "پیک", "تخفیف ویژه", "حراج", "بن خرید"
+    )
+
+    private val bankingContextRegex = Regex(
+        """(?:مانده|موجودی|م\.حساب|باقیمانده|حساب|کارت|شبا|شتاب|پایا|ساتنا|انتقال|واریز|برداشت|بستانکار|بدهکار|بانک|موسسه|سپرده|تراکنش|پوز|pos|خودپرداز|atm|رمز دوم|پین)"""
     )
 
     private val plateNumberRegex = Regex("""\b\d{2}\s*[\-\s]\s*\d{3}\s*[آ-یa-zA-Z]\s*\d{2}\b""")
@@ -185,6 +190,8 @@ object IranBankSmsParser {
 
         if (nonTransactionKeywords.any { lowerBody.contains(it) || lowerSender.contains(it) }) return null
         if (plateNumberRegex.containsMatchIn(body)) return null
+        // پیامک‌های تبلیغاتی، فروشگاهی، خدماتی یا مرسوله‌ای که هیچ نشانه‌ای از تراکنش/حساب/موجودی بانکی ندارند رد می‌شوند
+        if (!bankingContextRegex.containsMatchIn(lowerBody) && !bankingContextRegex.containsMatchIn(lowerSender)) return null
 
         val balanceMatch = balanceRegex.find(body)
         val rawBalanceStr = balanceMatch?.groupValues?.get(1)?.replace(",", "")
@@ -248,6 +255,17 @@ object IranBankSmsParser {
         if (type == TransactionType.UNKNOWN) return null
 
         val bankName = detectBankName(sender, body)
+        val hasBankingAnchor = bankName != "سایر بانک‌ها" ||
+                balanceAmount != null ||
+                rawAcc.isNotEmpty() ||
+                cleanPayer.isNotEmpty() ||
+                body.contains("مانده") ||
+                body.contains("موجودی") ||
+                body.contains("حساب") ||
+                body.contains("کارت") ||
+                body.contains("انتقال") ||
+                matchedSign.isNotEmpty()
+        if (!hasBankingAnchor) return null
         val accountKey = if (cleanAcc == "اصلی") "$bankName - اصلی" else "$bankName - $cleanAcc"
         val pDate = PersianDate(timestamp)
         val shamsiDate = PersianDateFormat("Y/m/d - H:i").format(pDate)

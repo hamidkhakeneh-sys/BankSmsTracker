@@ -346,14 +346,14 @@ object IranBankSmsParser {
     ): Pair<List<BankTransaction>, List<AccountProfileEntity>> {
         val normalizedMap = accountBankMappings.mapKeys { (k, _) -> extractAccountCore(k) }
         val digitEntries = accountBankMappings.mapNotNull { (k, v) ->
-            val d = k.replace(Regex("[^\d]"), "")
+            val d = k.replace(Regex("""[^\d]"""), "")
             if (d.length >= 4) d to v else null
         }
         val updatedProfiles = existingProfiles.toMutableMap()
 
         val updatedTxs = txList.map { tx ->
             val rawClean = tx.rawAccountNumber.trim()
-            val txDigits = rawClean.replace(Regex("[^\d]"), "").ifEmpty { tx.accountNumber.replace(Regex("[^\d]"), "") }
+            val txDigits = rawClean.replace(Regex("""[^\d]"""), "").ifEmpty { tx.accountNumber.replace(Regex("""[^\d]"""), "") }
             val core = extractAccountCore(rawClean.ifBlank { tx.accountNumber })
             val matchedBank = accountBankMappings[rawClean]
                 ?: accountBankMappings[tx.accountNumber]

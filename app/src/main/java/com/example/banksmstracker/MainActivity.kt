@@ -2528,7 +2528,8 @@ fun TransactionDetailDialog(
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(6.dp)) else {
+                Spacer(modifier = Modifier.height(6.dp))
+                if (false) {
                     Text(
                         text = "${formatCurrency(transaction.amount)} ریال (${formatCurrency(transaction.amount / 10)} تومان)",
                         fontWeight = FontWeight.Bold,

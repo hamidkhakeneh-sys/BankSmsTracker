@@ -13,8 +13,8 @@ android {
         applicationId = "com.example.banksmstracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 22
-        versionName = "22.0-Enterprise"
+        versionCode = 23
+        versionName = "23.0-Enterprise"
     }
 
     buildTypes {
@@ -68,7 +68,7 @@ dependencies {
     ksp("androidx.room:room-compiler:$roomVersion")
 
     // SQLCipher for full AES-256 database encryption
-    implementation("net.sqlcipher:android-database-sqlcipher:4.5.4")
+    implementation("net.zetetic:android-database-sqlcipher:4.5.4")
     implementation("androidx.sqlite:sqlite-ktx:2.4.0")
 
     // Persian Calendar

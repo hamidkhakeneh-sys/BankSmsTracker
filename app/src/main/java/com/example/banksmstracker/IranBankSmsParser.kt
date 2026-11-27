@@ -157,7 +157,9 @@ object IranBankSmsParser {
         """(?:مانده|موجودی|م\.حساب|باقیمانده|حساب|کارت|شبا|شتاب|پایا|ساتنا|انتقال|واریز|برداشت|بستانکار|بدهکار|بانک|موسسه|سپرده|تراکنش|پوز|pos|خودپرداز|atm|رمز دوم|پین)"""
     )
 
-    private val plateNumberRegex = Regex("""\b\d{2}\s*[\-\s]\s*\d{3}\s*[آ-یa-zA-Z]\s*\d{2}\b""")
+    private val plateNumberRegex = Regex("""(?:پلاک\s*[:=]?\s*)?\b\d{2}\s*[\-\s]?\d{3}\s*[آ-یa-zA-Z]\s*\d{2}(?:\s*(?:ایران|ir)\s*\d{1,2})?\b""", RegexOption.IGNORE_CASE)
+    private val urlOrLinkRegex = Regex("""(?:https?://|www\.|[a-z0-9\-]+\.(?:ir|com|net|org|me|shop|app)(?:/|\s|$))""", RegexOption.IGNORE_CASE)
+    private val nonBankServiceRegex = Regex("""(?:سفارش(?:ت|ات)?|نهایی کنی|اتمام موجودی|توقف|پارکومتر|پارکینگ|عوارض|قبض|کد تخفیف|جشنواره|اقساط|مرسوله|بسته اینترنت|بسته مکالمه|شارژ سیم‌کارت|لغو عضویت)""")
 
     private val balanceRegex = Regex(
         """(?:مانده|موجودی|م\.حساب|باقیمانده)\s*[:=\-]?\s*([+\-]?[\d,]{1,18})\s*(?:ریال|تومان)?"""
@@ -193,7 +195,8 @@ object IranBankSmsParser {
 
         if (nonTransactionKeywords.any { lowerBody.contains(it) || lowerSender.contains(it) }) return null
         if (plateNumberRegex.containsMatchIn(body)) return null
-        // پیامک‌های تبلیغاتی، فروشگاهی، خدماتی یا مرسوله‌ای که هیچ نشانه‌ای از تراکنش/حساب/موجودی بانکی ندارند رد می‌شوند
+        if (urlOrLinkRegex.containsMatchIn(body)) return null
+        if (nonBankServiceRegex.containsMatchIn(body)) return null
         if (!bankingContextRegex.containsMatchIn(lowerBody) && !bankingContextRegex.containsMatchIn(lowerSender)) return null
 
         val balanceMatch = balanceRegex.find(body)
@@ -258,12 +261,12 @@ object IranBankSmsParser {
         if (type == TransactionType.UNKNOWN) return null
 
         val bankName = detectBankName(sender, body)
-        // برای جلوگیری از شناسایی پیامک‌های تبلیغاتی/بسته‌های اینترنتی، وجود مانده/موجودی یا شناسایی بانک/حساب/علامت تراکنش الزامی است
-        val hasBankingAnchor = bankName != "سایر بانک‌ها" ||
-                balanceAmount != null ||
-                (rawAcc.isNotEmpty() && body.contains("حساب")) ||
-                cleanPayer.isNotEmpty() ||
-                matchedSign.isNotEmpty()
+        // پیامک بانکی معتبر باید یا بانک شناخته‌شده داشته باشد یا شناسه حساب/کارت/شبا/انتقال بانکی همراه با مانده/علامت تراکنش داشته باشد
+        val hasAccountOrCardStructure = accMatch != null || payerMatch != null ||
+                body.contains("حساب") || body.contains("کارت") || body.contains("شبا") ||
+                body.contains("پایا") || body.contains("ساتنا") || body.contains("شتاب")
+        val hasBankingAnchor = (bankName != "سایر بانک‌ها" && (balanceAmount != null || hasAccountOrCardStructure || matchedSign.isNotEmpty())) ||
+                (hasAccountOrCardStructure && (balanceAmount != null || matchedSign.isNotEmpty()))
         if (!hasBankingAnchor) return null
         val accountKey = if (cleanAcc == "اصلی") "$bankName - اصلی" else "$bankName - $cleanAcc"
         val pDate = PersianDate(timestamp)

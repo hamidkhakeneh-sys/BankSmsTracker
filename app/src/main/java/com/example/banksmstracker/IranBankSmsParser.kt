@@ -584,7 +584,7 @@ fun readAllTransactionsFast(
             val txD = tx.rawAccountNumber.replace(Regex("""[^\d]"""), "").ifEmpty { tx.accountNumber.replace(Regex("""[^\d]"""), "") }
             val resolved = knownBankByCore[tx.accountNumber]
                 ?: knownBankByCore.entries.firstOrNull { (k, _) ->
-                    isAccountDigitsMatch(txD, k.replace(Regex("""[^\d]"""), ""))
+                    IranBankSmsParser.isAccountDigitsMatch(txD, k.replace(Regex("""[^\d]"""), ""))
                 }?.value
             if (resolved != null) {
                 tx.copy(
@@ -625,7 +625,7 @@ fun readAllTransactionsFast(
             val smsDigits = smsTx.rawAccountNumber.replace(Regex("""[^\d]"""), "").ifEmpty {
                 smsTx.accountNumber.replace(Regex("""[^\d]"""), "")
             }
-            return smsTx.bankName == impBank && isAccountDigitsMatch(smsDigits, impAccDigits)
+            return smsTx.bankName == impBank && IranBankSmsParser.isAccountDigitsMatch(smsDigits, impAccDigits)
         }
 
         val exactBalIdx = if (imp.balance != null && imp.balance != 0L) {

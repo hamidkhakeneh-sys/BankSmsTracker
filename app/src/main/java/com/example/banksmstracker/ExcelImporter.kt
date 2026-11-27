@@ -127,7 +127,6 @@ object ExcelImporter {
         var workbook: Workbook? = null
         try {
             val settings = WorkbookSettings().apply {
-                suppressWarnings = true
                 encoding = "UTF-8"
             }
             workbook = Workbook.getWorkbook(ByteArrayInputStream(rawBytes), settings)

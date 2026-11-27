@@ -16,13 +16,14 @@
     </queries>
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="هم‌تراز"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
-        tools:replace="android:label,android:icon,android:roundIcon">
+        tools:replace="android:label,android:icon,android:roundIcon,android:allowBackup">
 
         <activity
             android:name=".MainActivity"
@@ -34,7 +35,7 @@
             </intent-filter>
         </activity>
 
-        <!-- گیرنده فوق کم‌مصرف بدون سرویس پس‌زمینه دائم (Zero-Battery Idle Footprint) -->
+        <!-- گیرنده رویدادمحور با مصرف باتری نزدیک به صفر (بدون باز کردن دیتابیس رمزنگاری‌شده در پس‌زمینه) -->
         <receiver
             android:name=".BackgroundSmsReceiver"
             android:enabled="true"

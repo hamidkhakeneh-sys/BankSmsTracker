@@ -17,9 +17,10 @@ enum class TransactionType {
 
 data class BankTransaction(
     val id: String,
+    val stableKey: String = "",
     val sender: String,
     val bankName: String,
-    val rawAccountNumber: String = "", // شماره حساب کامل و خام موجود در پیامک (مثلاً 361970003195155001)
+    val rawAccountNumber: String = "",
     val accountNumber: String,
     val accountKey: String,
     val scope: String,
@@ -60,50 +61,6 @@ fun formatCurrency(amount: Long): String {
 
 object IranBankSmsParser {
 
-    fun normalizePersian(input: String): String {
-        return input
-            .replace('ك', 'ک')
-            .replace('ي', 'ی')
-            .replace('ى', 'ی')
-            .replace('ة', 'ه')
-            .replace('ؤ', 'و')
-            .replace('إ', 'ا')
-            .replace('أ', 'ا')
-            .replace('آ', 'ا')
-            .replace('۰', '0').replace('۱', '1').replace('۲', '2')
-            .replace('۳', '3').replace('۴', '4').replace('۵', '5')
-            .replace('۶', '6').replace('۷', '7').replace('۸', '8')
-            .replace('۹', '9')
-            .replace('٠', '0').replace('١', '1').replace('٢', '2')
-            .replace('٣', '3').replace('٤', '4').replace('٥', '5')
-            .replace('٦', '6').replace('٧', '7').replace('٨', '8')
-            .replace('٩', '9')
-    }
-
-    private val nonTransactionKeywords = listOf(
-        "رمز", "پویا", "اعتبار این رمز", "کد تایید", "کد ورود",
-        "صورتحساب", "صورت حساب", "مهلت پرداخت", "قابل پرداخت", "باقی مانده هزینه",
-        "شناسه قبض", "شناسه پرداخت", "ش ق:", "ش پ:", "مشترک گرامی", "درخواست انشعاب",
-        "توزیع نیروی برق", "برق مشهد", "تابلو کنتور",
-        "بدهی پیشین", "بدهی کل", "تخفیف", "جشنواره", "قرعه کشی", "وام فوری",
-        "بسته مکالمه", "شاتل موبایل", "شماره گیری", "سرویس اعتباری", "جیب جت",
-        "بازپرداخت خود را", "تسهیلات به مبلغ", "تشکیل پرونده", "طرح یاقوت",
-        "هزینه پیامک ارسالی", "قطع استفاده از سرویس", "عدد 1 را",
-        "elit", "پارکینگ", "پارک حاشیه", "عوارض پارک"
-    )
-
-    private val plateNumberRegex = Regex("""\b\d{2}\s*[\-\s]\s*\d{3}\s*[آ-یa-zA-Z]\s*\d{2}\b""")
-
-    private val balanceRegex = Regex(
-        """(?:مانده|موجودی|م\.حساب|باقیمانده)\s*[:=\-]?\s*([\d,]{1,18})\s*(?:ریال|تومان)?"""
-    )
-
-    // استخراج شماره حساب دارای برچسب (حداقل یک رقم داشته باشد تا با کاراکترهای تزئینی مثل *** اشتباه نشود)
-    private val labeledAccountRegex = Regex(
-        """(?:حساب|کارت|ش\.حساب|شماره حساب)\s*[:=\-*]?\s*([\d*.\-]*\d[\d*.\-]{2,20})"""
-    )
-
-    // لیست جامع تمام بانک‌ها و موسسات اعتباری رسمی ایران برای انتخاب کاربر
     val ALL_IRANIAN_BANKS = listOf(
         "بانک ملی ایران",
         "بانک ملت",
@@ -137,7 +94,72 @@ object IranBankSmsParser {
         "موسسه اعتباری ملل"
     )
 
-    // استخراج شماره حساب بدون برچسب (در سطر اول یا هر سطر مستقل پیامک، حتی اگر کاراکتر مخفی RTL/LTR داشته باشد)
+    fun normalizePersian(input: String): String {
+        return input
+            .replace('ك', 'ک')
+            .replace('ي', 'ی')
+            .replace('ى', 'ی')
+            .replace('ة', 'ه')
+            .replace('ؤ', 'و')
+            .replace('إ', 'ا')
+            .replace('أ', 'ا')
+            .replace('آ', 'ا')
+            .replace('٬', ',')
+            .replace('،', ',')
+            .replace('۰', '0').replace('۱', '1').replace('۲', '2')
+            .replace('۳', '3').replace('۴', '4').replace('۵', '5')
+            .replace('۶', '6').replace('۷', '7').replace('۸', '8')
+            .replace('۹', '9')
+            .replace('٠', '0').replace('١', '1').replace('٢', '2')
+            .replace('٣', '3').replace('٤', '4').replace('٥', '5')
+            .replace('٦', '6').replace('٧', '7').replace('٨', '8')
+            .replace('٩', '9')
+    }
+
+    /**
+     * استخراج هسته یکتای شماره حساب برای یکسان‌سازی فرمت‌های مختلف یک حساب بانکی
+     * مثلاً 3608-700-3195155-1 و 361970003195155001 هر دو به 3195155 نگاشت می‌شوند
+     */
+    fun extractAccountCore(rawAccount: String): String {
+        val digitsOnly = rawAccount.replace(Regex("""[^\d]"""), "")
+        return when {
+            digitsOnly.length >= 15 -> digitsOnly.drop(7).take(7).ifEmpty { digitsOnly.takeLast(7) }
+            digitsOnly.length in 10..14 -> digitsOnly.takeLast(7)
+            digitsOnly.length in 4..9 -> digitsOnly
+            rawAccount.contains(".") -> rawAccount.trim()
+            else -> "اصلی"
+        }
+    }
+
+    fun buildStableTransactionKey(body: String, amount: Long, balance: Long?, timestamp: Long): String {
+        val pDate = PersianDate(timestamp)
+        val dayStr = PersianDateFormat("Y/m/d").format(pDate)
+        val compactBody = normalizePersian(body).replace(Regex("""\s+"""), "").take(80)
+        return "tx_${dayStr}_${amount}_${balance ?: 0L}_${compactBody.hashCode()}"
+    }
+
+    private val nonTransactionKeywords = listOf(
+        "رمز پویا", "اعتبار این رمز", "کد تایید", "کد ورود",
+        "صورتحساب", "صورت حساب", "مهلت پرداخت", "قابل پرداخت", "باقی مانده هزینه",
+        "شناسه قبض", "شناسه پرداخت", "ش ق:", "ش پ:", "مشترک گرامی", "درخواست انشعاب",
+        "توزیع نیروی برق", "برق مشهد", "تابلو کنتور",
+        "بدهی پیشین", "بدهی کل", "جشنواره", "قرعه کشی", "وام فوری",
+        "بسته مکالمه", "شاتل موبایل", "شماره گیری", "سرویس اعتباری", "جیب جت",
+        "بازپرداخت خود را", "تسهیلات به مبلغ", "تشکیل پرونده", "طرح یاقوت",
+        "هزینه پیامک ارسالی", "قطع استفاده از سرویس", "عدد 1 را",
+        "elit", "پارک حاشیه", "عوارض پارک"
+    )
+
+    private val plateNumberRegex = Regex("""\b\d{2}\s*[\-\s]\s*\d{3}\s*[آ-یa-zA-Z]\s*\d{2}\b""")
+
+    private val balanceRegex = Regex(
+        """(?:مانده|موجودی|م\.حساب|باقیمانده)\s*[:=\-]?\s*([+\-]?[\d,]{1,18})\s*(?:ریال|تومان)?"""
+    )
+
+    private val labeledAccountRegex = Regex(
+        """(?:حساب|کارت|ش\.حساب|شماره حساب)\s*[:=\-*]?\s*([\d*.\-]*\d[\d*.\-]{2,20})"""
+    )
+
     private val standaloneAccountRegex = Regex(
         """(?m)^[\s\u200C\u200E\u200F]*(\d[\d.\-]{8,23})[\s\u200C\u200E\u200F]*$"""
     )
@@ -147,14 +169,14 @@ object IranBankSmsParser {
     )
 
     private val transactionPatterns = listOf(
-        Regex("""مبلغ(?:\s+تراکنش)?\s*[:=\-]?\s*[+\-]?\s*([\d,]{3,15})\s*(?:ریال|تومان)?"""),
+        Regex("""مبلغ(?:\s+تراکنش)?\s*[:=\-]?\s*([+\-]?[\d,]{3,15})\s*(ریال|تومان)?"""),
         Regex("""(?:واریز|برداشت|انتقال|خرید)?\s*[:=\-]?\s*([+\-]\s*[\d,]{3,15}|[\d,]{3,15}\s*[+\-])"""),
-        Regex("""([\d,]{3,15})\s*(?:ریال|تومان)\s*(?:به حساب|از حساب|واریز|برداشت)"""),
+        Regex("""([\d,]{3,15})\s*(ریال|تومان)\s*(?:به حساب|از حساب|واریز|برداشت)?"""),
         Regex("""(?:واریز|برداشت|بستانکار|بدهکار|خرید|پرداخت|کسر از حساب)\s*(?:به|از)?\s*[:=\-]?\s*([\d,]{3,15})""")
     )
 
-    private val depositRegex = Regex("""(?:واریز|بستانکار|افزایش|به حساب شما واریز|\+\s*[\d,]+|[\d,]+\s*\+)""")
-    private val withdrawalRegex = Regex("""(?:برداشت|بدهکار|خرید|کسر|پرداخت|از حساب شما برداشت|\-\s*[\d,]+|[\d,]+\s*\-)""")
+    private val withdrawalCuesRegex = Regex("""(?:برداشت|بدهکار|خرید|کسر|پرداخت|از حساب شما برداشت|انتقال به|واریز به|حواله به|\-\s*[\d,]+|[\d,]+\s*\-)""")
+    private val depositCuesRegex = Regex("""(?:واریز به حساب|واریز از|واریز توسط|بستانکار|افزایش موجودی|به حساب شما واریز|\+\s*[\d,]+|[\d,]+\s*\+)""")
 
     fun parseSms(id: String, sender: String, rawBody: String, timestamp: Long): BankTransaction? {
         val body = normalizePersian(rawBody)
@@ -164,45 +186,45 @@ object IranBankSmsParser {
         if (nonTransactionKeywords.any { lowerBody.contains(it) || lowerSender.contains(it) }) return null
         if (plateNumberRegex.containsMatchIn(body)) return null
 
-        val balanceMatch = balanceRegex.find(body) ?: return null
-        val balanceAmount = balanceMatch.groupValues[1].replace(",", "").toLongOrNull()
+        val balanceMatch = balanceRegex.find(body)
+        val rawBalanceStr = balanceMatch?.groupValues?.get(1)?.replace(",", "")
+        val balanceAmount = if (rawBalanceStr != null) {
+            val isNegBal = rawBalanceStr.startsWith("-") || balanceMatch.value.contains("-")
+            val absBal = rawBalanceStr.replace(Regex("""[^\d]"""), "").toLongOrNull()
+            if (absBal != null) (if (isNegBal) -absBal else absBal) else null
+        } else null
 
         val firstLine = body.lines().firstOrNull { it.trim().isNotEmpty() }?.trim() ?: ""
         val firstLineDigits = Regex("""^(\d[\d.\-]{8,23})$""").find(firstLine)?.groupValues?.get(1)
         val accMatch = labeledAccountRegex.find(body) ?: standaloneAccountRegex.find(body)
         val rawAcc = (accMatch?.groupValues?.get(1)?.trim() ?: firstLineDigits ?: "")
-        val digitsOnlyAcc = rawAcc.replace(Regex("""[^\d]"""), "")
-        val cleanAcc = when {
-            digitsOnlyAcc.length >= 10 -> {
-                val core = if (digitsOnlyAcc.length >= 15) digitsOnlyAcc.drop(7).take(7) else digitsOnlyAcc.takeLast(7)
-                core.ifEmpty { digitsOnlyAcc.takeLast(6) }
-            }
-            digitsOnlyAcc.length in 4..9 -> digitsOnlyAcc
-            rawAcc.contains(".") -> rawAcc
-            else -> "اصلی"
-        }
+        val cleanAcc = extractAccountCore(rawAcc)
 
         val payerMatch = payerCardOrAccRegex.find(body)
         val rawPayer = payerMatch?.groupValues?.get(1)?.trim() ?: ""
         val cleanPayer = if (rawPayer.isNotEmpty() && rawPayer != rawAcc) rawPayer else ""
 
-        var cleanBodyForAmount = body.replace(balanceMatch.value, "")
+        var cleanBodyForAmount = body
+        if (balanceMatch != null) cleanBodyForAmount = cleanBodyForAmount.replace(balanceMatch.value, "")
         if (accMatch != null) cleanBodyForAmount = cleanBodyForAmount.replace(accMatch.value, "")
         if (payerMatch != null) cleanBodyForAmount = cleanBodyForAmount.replace(payerMatch.value, "")
 
         var transactionAmount = 0L
         var matchedSign = ""
+        var isTomanUnit = false
 
         for (pattern in transactionPatterns) {
             val match = pattern.find(cleanBodyForAmount)
             if (match != null) {
                 val rawNumStr = match.groupValues[1]
+                val unitStr = match.groupValues.getOrNull(2) ?: ""
                 if (rawNumStr.contains("+")) matchedSign = "+"
                 if (rawNumStr.contains("-")) matchedSign = "-"
+                if (unitStr == "تومان") isTomanUnit = true
 
                 val cleanNum = rawNumStr.replace(Regex("""[^\d]"""), "").toLongOrNull() ?: 0L
                 if (cleanNum in 100L..500_000_000_000L) {
-                    transactionAmount = cleanNum
+                    transactionAmount = if (isTomanUnit) cleanNum * 10L else cleanNum
                     break
                 }
             }
@@ -210,24 +232,33 @@ object IranBankSmsParser {
 
         if (transactionAmount == 0L) return null
 
+        val hasWithdrawalCue = matchedSign == "-" || withdrawalCuesRegex.containsMatchIn(cleanBodyForAmount)
+        val hasDepositCue = matchedSign == "+" || depositCuesRegex.containsMatchIn(cleanBodyForAmount)
+
         val type = when {
-            matchedSign == "+" || depositRegex.containsMatchIn(cleanBodyForAmount) -> TransactionType.DEPOSIT
-            matchedSign == "-" || withdrawalRegex.containsMatchIn(cleanBodyForAmount) -> TransactionType.WITHDRAWAL
+            hasWithdrawalCue && !hasDepositCue -> TransactionType.WITHDRAWAL
+            hasDepositCue && !hasWithdrawalCue -> TransactionType.DEPOSIT
+            matchedSign == "+" -> TransactionType.DEPOSIT
+            matchedSign == "-" -> TransactionType.WITHDRAWAL
+            hasWithdrawalCue -> TransactionType.WITHDRAWAL
+            hasDepositCue -> TransactionType.DEPOSIT
             else -> TransactionType.UNKNOWN
         }
 
         if (type == TransactionType.UNKNOWN) return null
 
         val bankName = detectBankName(sender, body)
-        val accountKey = "$bankName - $cleanAcc"
+        val accountKey = if (cleanAcc == "اصلی") "$bankName - اصلی" else "$bankName - $cleanAcc"
         val pDate = PersianDate(timestamp)
         val shamsiDate = PersianDateFormat("Y/m/d - H:i").format(pDate)
         val shamsiDateOnly = PersianDateFormat("Y/m/d").format(pDate)
         val shamsiMonthYear = PersianDateFormat("Y/m").format(pDate)
         val shamsiYear = PersianDateFormat("Y").format(pDate)
+        val stableKey = buildStableTransactionKey(body, transactionAmount, balanceAmount, timestamp)
 
         return BankTransaction(
             id = id,
+            stableKey = stableKey,
             sender = sender,
             bankName = bankName,
             rawAccountNumber = rawAcc.ifEmpty { if (cleanAcc != "اصلی") cleanAcc else "" },
@@ -252,95 +283,87 @@ object IranBankSmsParser {
         val senderLower = normalizePersian(sender).lowercase()
         val combined = "$senderLower $bodyLower"
 
+        fun hasWord(token: String): Boolean {
+            return Regex("""(?:^|[^آ-یa-z0-9_])""" + Regex.escape(token) + """(?:$|[^آ-یa-z0-9_])""").containsMatchIn(combined)
+        }
+
         return when {
-            bodyLower.contains("بانک قرض الحسنه رسالت") || bodyLower.contains("بانک رسالت") -> "بانک رسالت"
-            bodyLower.contains("بانک قرض الحسنه مهر") || bodyLower.contains("مهر ایران") || bodyLower.contains("مهرایران") || bodyLower.contains("qmehr") -> "مهر ایران"
-            bodyLower.contains("بانک تجارت") -> "بانک تجارت"
-            bodyLower.contains("بانک سامان") -> "بانک سامان"
-            bodyLower.contains("بانک ملت") -> "بانک ملت"
-            bodyLower.contains("بانک ملی") -> "بانک ملی"
-            bodyLower.contains("بانک پاسارگاد") -> "بانک پاسارگاد"
-            bodyLower.contains("بانک صادرات") -> "بانک صادرات"
-            bodyLower.contains("بانک سپه") -> "بانک سپه"
-            bodyLower.contains("بانک کشاورزی") -> "بانک کشاورزی"
-            bodyLower.contains("بانک مسکن") -> "بانک مسکن"
-            bodyLower.contains("بانک رفاه") -> "بانک رفاه"
-            bodyLower.contains("بانک شهر") -> "بانک شهر"
-            bodyLower.contains("بانک اینده") -> "بانک آینده"
-            bodyLower.contains("بانک پارسیان") -> "بانک پارسیان"
-            bodyLower.contains("اقتصاد نوین") -> "اقتصاد نوین"
-            bodyLower.contains("بانک سینا") -> "بانک سینا"
-            bodyLower.contains("پست بانک") -> "پست بانک"
-            bodyLower.contains("بلوبانک") || bodyLower.contains("بلو بانک") -> "بلوبانک"
-            combined.contains("resalat") || combined.contains("رسالت") -> "بانک رسالت"
-            combined.contains("tejarat") || combined.contains("تجارت") -> "بانک تجارت"
-            combined.contains("saman") || combined.contains("سامان") -> "بانک سامان"
-            combined.contains("mellat") || combined.contains("ملت") -> "بانک ملت"
-            combined.contains("melli") || combined.contains("bmi") || combined.contains("ملی") -> "بانک ملی"
-            combined.contains("pasargad") || combined.contains("bpi") || combined.contains("پاسارگاد") -> "بانک پاسارگاد"
-            combined.contains("saderat") || combined.contains("صادرات") -> "بانک صادرات"
-            combined.contains("sepah") || combined.contains("سپه") -> "بانک سپه"
-            combined.contains("keshavarzi") || combined.contains("کشاورزی") -> "بانک کشاورزی"
-            combined.contains("maskan") || combined.contains("مسکن") -> "بانک مسکن"
-            combined.contains("refah") || combined.contains("رفاه") -> "بانک رفاه"
-            combined.contains("shahr") || combined.contains("شهر") -> "بانک شهر"
-            combined.contains("ayandeh") || combined.contains("اینده") -> "بانک آینده"
-            combined.contains("blu") || combined.contains("بلو") -> "بلوبانک"
+            bodyLower.contains("بانک قرض الحسنه رسالت") || bodyLower.contains("بانک رسالت") || hasWord("رسالت") || hasWord("resalat") -> "بانک قرض‌الحسنه رسالت"
+            bodyLower.contains("بانک قرض الحسنه مهر") || bodyLower.contains("مهر ایران") || bodyLower.contains("مهرایران") || bodyLower.contains("qmehr") || hasWord("مهر") -> "بانک قرض‌الحسنه مهر ایران"
+            bodyLower.contains("بانک تجارت") || hasWord("تجارت") || hasWord("tejarat") -> "بانک تجارت"
+            bodyLower.contains("بانک سامان") || hasWord("سامان") || hasWord("saman") -> "بانک سامان"
+            bodyLower.contains("بانک ملت") || hasWord("ملت") || hasWord("mellat") -> "بانک ملت"
+            bodyLower.contains("بانک ملی") || hasWord("ملی") || hasWord("melli") || hasWord("bmi") -> "بانک ملی ایران"
+            bodyLower.contains("بانک پاسارگاد") || hasWord("پاسارگاد") || hasWord("pasargad") || hasWord("bpi") -> "بانک پاسارگاد"
+            bodyLower.contains("بانک صادرات") || hasWord("صادرات") || hasWord("saderat") -> "بانک صادرات ایران"
+            bodyLower.contains("بانک سپه") || hasWord("سپه") || hasWord("sepah") -> "بانک سپه"
+            bodyLower.contains("بانک کشاورزی") || hasWord("کشاورزی") || hasWord("keshavarzi") -> "بانک کشاورزی"
+            bodyLower.contains("بانک مسکن") || hasWord("مسکن") || hasWord("maskan") -> "بانک مسکن"
+            bodyLower.contains("بانک رفاه") || hasWord("رفاه") || hasWord("refah") -> "بانک رفاه کارگران"
+            bodyLower.contains("بانک شهر") || hasWord("شهر") || hasWord("shahr") -> "بانک شهر"
+            bodyLower.contains("بانک اینده") || hasWord("آینده") || hasWord("ayandeh") -> "بانک آینده"
+            bodyLower.contains("بانک پارسیان") || hasWord("پارسیان") || hasWord("parsian") -> "بانک پارسیان"
+            bodyLower.contains("اقتصاد نوین") || hasWord("eghtesad") -> "بانک اقتصاد نوین"
+            bodyLower.contains("بانک سینا") || hasWord("سینا") || hasWord("sina") -> "بانک سینا"
+            bodyLower.contains("پست بانک") || hasWord("پست") || hasWord("post") -> "پست بانک ایران"
+            bodyLower.contains("بلوبانک") || bodyLower.contains("بلو بانک") || hasWord("بلو") || hasWord("blu") -> "بلوبانک (سامان)"
             else -> "سایر بانک‌ها"
         }
     }
 
+    /**
+     * تثبیت کلید حساب بر پایه شماره حساب واقعی (بدون جابه‌جایی برچسب‌ها با تغییر تعداد تراکنش‌ها)
+     */
+    fun buildStableAccountKey(bankName: String, accountNumber: String): String {
+        return if (accountNumber.isBlank() || accountNumber == "اصلی") {
+            "$bankName - اصلی"
+        } else {
+            "$bankName - $accountNumber"
+        }
+    }
 
-    fun recomputeBankAccountRoles(
+    fun applyAccountBankMappingsInMemory(
         txList: List<BankTransaction>,
+        accountBankMappings: Map<String, String>,
         existingProfiles: Map<String, AccountProfileEntity>
     ): Pair<List<BankTransaction>, List<AccountProfileEntity>> {
-        val updated = txList.toMutableList()
-        val accountsGroupedByBank = updated.groupBy { it.bankName }
-        val renamedAccountKeyMap = mutableMapOf<String, String>()
+        val normalizedMap = accountBankMappings.mapKeys { (k, _) -> extractAccountCore(k) }
+        val updatedProfiles = existingProfiles.toMutableMap()
 
-        for ((bName, txListOfBank) in accountsGroupedByBank) {
-            val distinctAccsSortedByActivity = txListOfBank
-                .groupBy { it.accountNumber }
-                .toList()
-                .sortedByDescending { it.second.size }
+        val updatedTxs = txList.map { tx ->
+            val core = extractAccountCore(tx.rawAccountNumber.ifBlank { tx.accountNumber })
+            val matchedBank = accountBankMappings[tx.rawAccountNumber]
+                ?: accountBankMappings[tx.accountNumber]
+                ?: normalizedMap[core]
 
-            if (distinctAccsSortedByActivity.size == 1) {
-                val (accNum, _) = distinctAccsSortedByActivity[0]
-                val newKey = if (accNum == "اصلی") "$bName - اصلی" else "$bName - اصلی ($accNum)"
-                txListOfBank.forEach { renamedAccountKeyMap[it.accountKey] = newKey }
-            } else {
-                distinctAccsSortedByActivity.forEachIndexed { idx, (accNum, groupTxs) ->
-                    val roleLabel = if (idx == 0) "اصلی" else "فرعی $idx"
-                    val newKey = if (accNum == "اصلی") "$bName - $roleLabel" else "$bName - $roleLabel ($accNum)"
-                    groupTxs.forEach { renamedAccountKeyMap[it.accountKey] = newKey }
-                }
-            }
-        }
+            val finalBank = matchedBank ?: tx.bankName
+            val finalAccNum = if (core != "اصلی") core else tx.accountNumber
+            val finalKey = buildStableAccountKey(finalBank, finalAccNum)
 
-        val newProfiles = mutableMapOf<String, AccountProfileEntity>()
-        for (i in updated.indices) {
-            val tx = updated[i]
-            val finalKey = renamedAccountKeyMap[tx.accountKey] ?: tx.accountKey
-            val existingProf = existingProfiles[finalKey]
-                ?: existingProfiles.values.find { it.bankName == tx.bankName && it.accountNumber == tx.accountNumber }
-                ?: existingProfiles[tx.accountKey]
-                ?: AccountProfileEntity(
+            val profile = updatedProfiles.getOrPut(finalKey) {
+                existingProfiles[tx.accountKey]?.copy(
                     accountKey = finalKey,
-                    bankName = tx.bankName,
-                    accountNumber = tx.accountNumber,
+                    bankName = finalBank,
+                    accountNumber = finalAccNum,
+                    customTitle = finalKey
+                ) ?: AccountProfileEntity(
+                    accountKey = finalKey,
+                    bankName = finalBank,
+                    accountNumber = finalAccNum,
                     customTitle = finalKey,
                     scope = tx.scope
                 )
-            val syncedProfile = existingProf.copy(
+            }
+
+            tx.copy(
+                bankName = finalBank,
+                accountNumber = finalAccNum,
                 accountKey = finalKey,
-                bankName = tx.bankName,
-                customTitle = finalKey
+                scope = profile.scope
             )
-            newProfiles[finalKey] = syncedProfile
-            updated[i] = tx.copy(accountKey = finalKey, scope = syncedProfile.scope)
         }
-        return Pair(updated, newProfiles.values.toList())
+
+        return Pair(updatedTxs, updatedProfiles.values.toList())
     }
 
     fun detectInternalTransfers(
@@ -348,13 +371,14 @@ object IranBankSmsParser {
         savedNotes: Map<String, TransactionNoteEntity>
     ): List<BankTransaction> {
         val result = transactions.toMutableList()
-        val maxWindowMillis = 24 * 60 * 60 * 1000L
-        val maxFeeTolerance = 60_000L
+        val maxWindowMillis = 2 * 60 * 60 * 1000L
+        val maxFeeTolerance = 5_000L
         val matchedDepositIds = mutableSetOf<String>()
 
         for (i in result.indices) {
             val tx = result[i]
-            val override = savedNotes[tx.id]?.isInternalTransferOverride
+            val noteEntity = savedNotes[tx.stableKey] ?: savedNotes[tx.id]
+            val override = noteEntity?.isInternalTransferOverride
             if (override != null) {
                 if (override) {
                     result[i] = tx.copy(type = TransactionType.INTERNAL, transferPairInfo = "ثبت دستی به عنوان انتقال داخلی")
@@ -362,15 +386,16 @@ object IranBankSmsParser {
                 continue
             }
 
-            if (tx.type == TransactionType.WITHDRAWAL) {
+            if (tx.type == TransactionType.WITHDRAWAL && tx.scope != "مدیریت ساختمان") {
                 val matchingDepositIndex = result.indexOfFirst { other ->
                     other.id != tx.id &&
                             !matchedDepositIds.contains(other.id) &&
                             other.type == TransactionType.DEPOSIT &&
+                            other.scope != "مدیریت ساختمان" &&
                             other.accountKey != tx.accountKey &&
                             abs(other.timestampMillis - tx.timestampMillis) <= maxWindowMillis &&
                             (tx.amount - other.amount) in 0L..maxFeeTolerance &&
-                            savedNotes[other.id]?.isInternalTransferOverride != false
+                            (savedNotes[other.stableKey] ?: savedNotes[other.id])?.isInternalTransferOverride != false
                 }
 
                 if (matchingDepositIndex != -1) {
@@ -489,156 +514,88 @@ fun readAllTransactionsFast(
             if (blockedSenders.contains(sender)) continue
 
             IranBankSmsParser.parseSms(id, sender, body, dateMillis)?.let { parsedTx ->
-                // اعمال نگاشت دستی شماره حساب به بانک (در صورتی که کاربر قبلاً این شماره حساب را به بانکی متصل کرده باشد)
-                val rawDigitsOnly = parsedTx.rawAccountNumber.replace(Regex("""[^\d]"""), "")
-                val mappedBank = accountBankMappings[parsedTx.rawAccountNumber]
-                    ?: accountBankMappings[parsedTx.accountNumber]
-                    ?: accountBankMappings.entries.firstOrNull { (k, _) ->
-                        val kDigits = k.replace(Regex("""[^\d]"""), "")
-                        kDigits.isNotEmpty() && (kDigits == rawDigitsOnly || (kDigits.length >= 6 && rawDigitsOnly.contains(kDigits)))
-                    }?.value
-                val tx = if (mappedBank != null) {
-                    val newKey = "$mappedBank - ${parsedTx.accountNumber}"
-                    parsedTx.copy(bankName = mappedBank, accountKey = newKey)
-                } else {
-                    parsedTx
-                }
+                if (ignoredSmsIds.contains(parsedTx.stableKey)) return@let
 
-                val profile = discoveredAccounts.getOrPut(tx.accountKey) {
-                    AccountProfileEntity(
-                        accountKey = tx.accountKey,
-                        bankName = tx.bankName,
-                        accountNumber = tx.accountNumber,
-                        customTitle = tx.accountKey,
-                        scope = "شخصی"
-                    )
-                }
-
-                val savedEntity = savedNotes[id]
-                val autoMapping = if (tx.payerIdentifier.isNotEmpty()) payerMappings[tx.payerIdentifier] else null
+                val savedEntity = savedNotes[parsedTx.stableKey] ?: savedNotes[id]
+                val autoMapping = if (parsedTx.payerIdentifier.isNotEmpty()) payerMappings[parsedTx.payerIdentifier] else null
                 val resolvedUnitId = savedEntity?.unitId ?: autoMapping?.unitId
                 val autoUnitNote = autoMapping?.unitTitle ?: ""
                 val finalNote = savedEntity?.note?.ifBlank { autoUnitNote } ?: autoUnitNote
-                val finalCategory = savedEntity?.category?.ifBlank {
-                    if (resolvedUnitId != null && profile.scope == "مدیریت ساختمان") "شارژ ماهیانه واحدها" else ""
-                } ?: if (resolvedUnitId != null && profile.scope == "مدیریت ساختمان") "شارژ ماهیانه واحدها" else ""
 
                 rawTransactions.add(
-                    tx.copy(
-                        scope = profile.scope,
+                    parsedTx.copy(
                         unitId = resolvedUnitId,
                         receiptImagePath = savedEntity?.receiptImagePath ?: "",
                         userNote = finalNote,
-                        category = finalCategory
+                        category = savedEntity?.category ?: ""
                     )
                 )
             }
         }
     }
 
-    // ۱. نگاشت هوشمند شماره حساب‌های بدون عنوان بانک به نام بانک شناخته‌شده در سایر پیامک‌ها
-    val knownBankByAccountNum = rawTransactions
+    // نگاشت خودکار شماره حساب‌های بدون نام بانک به بانک شناخته‌شده در سایر پیامک‌ها
+    val knownBankByCore = rawTransactions
         .filter { it.bankName != "سایر بانک‌ها" && it.accountNumber != "اصلی" }
         .associate { it.accountNumber to it.bankName }
 
-    for (i in rawTransactions.indices) {
-        val tx = rawTransactions[i]
+    val autoResolvedTxs = rawTransactions.map { tx ->
         if (tx.bankName == "سایر بانک‌ها" && tx.accountNumber != "اصلی") {
-            val resolvedBank = knownBankByAccountNum[tx.accountNumber]
-            if (resolvedBank != null) {
-                val fixedAccountKey = "$resolvedBank - ${tx.accountNumber}"
-                rawTransactions[i] = tx.copy(
-                    bankName = resolvedBank,
-                    accountKey = fixedAccountKey
+            val resolved = knownBankByCore[tx.accountNumber]
+            if (resolved != null) {
+                tx.copy(
+                    bankName = resolved,
+                    accountKey = IranBankSmsParser.buildStableAccountKey(resolved, tx.accountNumber)
                 )
-            }
+            } else tx
+        } else tx
+    }
+
+    // اعمال نگاشت‌های دستی کاربر و پروفایل‌های حساب
+    val (mappedTxs, updatedProfilesList) = IranBankSmsParser.applyAccountBankMappingsInMemory(
+        txList = autoResolvedTxs,
+        accountBankMappings = accountBankMappings,
+        existingProfiles = discoveredAccounts
+    )
+
+    val finalTxs = mappedTxs.map { tx ->
+        val finalCat = tx.category.ifBlank {
+            if (tx.unitId != null && tx.scope == "مدیریت ساختمان") "شارژ ماهیانه واحدها" else ""
         }
-    }
+        tx.copy(category = finalCat)
+    }.toMutableList()
 
-    // ۲. نام‌گذاری خودکار چند حساب در یک بانک به صورت «اصلی»، «فرعی ۱»، «فرعی ۲» بر اساس بیشترین تعداد تراکنش
-    val accountsGroupedByBank = rawTransactions.groupBy { it.bankName }
-    val renamedAccountKeyMap = mutableMapOf<String, String>()
+    updatedProfilesList.forEach { discoveredAccounts[it.accountKey] = it }
 
-    for ((bName, txListOfBank) in accountsGroupedByBank) {
-        val distinctAccsSortedByActivity = txListOfBank
-            .groupBy { it.accountNumber }
-            .toList()
-            .sortedByDescending { it.second.size } // پرگردش‌ترین حساب = اصلی
-
-        if (distinctAccsSortedByActivity.size == 1) {
-            val (accNum, _) = distinctAccsSortedByActivity[0]
-            val oldKey = "$bName - $accNum"
-            val newKey = if (accNum == "اصلی") "$bName - اصلی" else "$bName - اصلی ($accNum)"
-            renamedAccountKeyMap[oldKey] = newKey
-        } else {
-            distinctAccsSortedByActivity.forEachIndexed { idx, (accNum, _) ->
-                val oldKey = "$bName - $accNum"
-                val roleLabel = if (idx == 0) "اصلی" else "فرعی $idx"
-                val newKey = if (accNum == "اصلی") "$bName - $roleLabel" else "$bName - $roleLabel ($accNum)"
-                renamedAccountKeyMap[oldKey] = newKey
-            }
-        }
-    }
-
-    discoveredAccounts.clear()
-    for (i in rawTransactions.indices) {
-        val tx = rawTransactions[i]
-        val finalKey = renamedAccountKeyMap[tx.accountKey] ?: tx.accountKey
-        // حفظ تنظیمات قبلی کاربر (مثل اختصاص به مدیریت ساختمان) حتی اگر پسوند حساب به «اصلی / فرعی ۱» تغییر کرده باشد
-        val existingProf = accountProfiles[finalKey]
-            ?: accountProfiles.values.find { it.bankName == tx.bankName && it.accountNumber == tx.accountNumber }
-            ?: AccountProfileEntity(
-                accountKey = finalKey,
-                bankName = tx.bankName,
-                accountNumber = tx.accountNumber,
-                customTitle = finalKey,
-                scope = tx.scope
-            )
-        val syncedProfile = existingProf.copy(accountKey = finalKey, customTitle = finalKey)
-        discoveredAccounts[finalKey] = syncedProfile
-
-        rawTransactions[i] = tx.copy(
-            accountKey = finalKey,
-            scope = syncedProfile.scope
-        )
-    }
-
+    // تطبیق دقیق صورت‌حساب اکسل/CSV با پیامک‌ها بدون حذف ردیف‌های هم‌روز و هم‌مبلغ
+    val matchedSmsIds = mutableSetOf<String>()
     for (imp in importedRecords) {
         if (ignoredSmsIds.contains(imp.recordId)) continue
-        val impBankName = imp.accountKey.substringBefore(" - ").trim()
         val impDateOnly = imp.persianDate.substringBefore(" - ").trim()
 
-        // اولویت ۱: تطبیق دقیق بر اساس تاریخ + مبلغ + مانده حساب (جلوگیری از تداخل دو واریز هم‌مبلغ)
-        val exactBalanceMatchIndex = if (imp.balance != null && imp.balance > 0L) {
-            rawTransactions.indexOfFirst { smsTx ->
-                val sameBank = smsTx.accountKey == imp.accountKey ||
-                        smsTx.bankName == impBankName ||
-                        smsTx.bankName.contains(impBankName.removePrefix("بانک ")) ||
-                        impBankName.contains(smsTx.bankName.removePrefix("بانک "))
-                val sameAmount = smsTx.amount == imp.amount
-                val sameDate = smsTx.persianDateOnly == impDateOnly
-                val sameBal = smsTx.balance != null && abs(smsTx.balance - imp.balance) <= 10L
-                sameBank && sameAmount && sameDate && sameBal
+        val exactBalIdx = if (imp.balance != null && imp.balance != 0L) {
+            finalTxs.indexOfFirst { smsTx ->
+                !matchedSmsIds.contains(smsTx.id) &&
+                    smsTx.accountKey == imp.accountKey &&
+                    smsTx.amount == imp.amount &&
+                    smsTx.persianDateOnly == impDateOnly &&
+                    smsTx.balance != null && abs(smsTx.balance - imp.balance) <= 10L
             }
         } else -1
 
-        val matchingSmsIndex = if (exactBalanceMatchIndex != -1) {
-            exactBalanceMatchIndex
-        } else {
-            rawTransactions.indexOfFirst { smsTx ->
-                val sameBank = smsTx.accountKey == imp.accountKey ||
-                        smsTx.bankName == impBankName ||
-                        smsTx.bankName.contains(impBankName.removePrefix("بانک ")) ||
-                        impBankName.contains(smsTx.bankName.removePrefix("بانک "))
-                val sameType = (smsTx.type == TransactionType.DEPOSIT) == imp.isDeposit || smsTx.type == TransactionType.INTERNAL
-                val sameAmount = smsTx.amount == imp.amount
-                val sameDate = smsTx.persianDateOnly == impDateOnly
-                sameBank && sameType && sameAmount && sameDate
+        val matchIdx = if (exactBalIdx != -1) exactBalIdx else {
+            finalTxs.indexOfFirst { smsTx ->
+                !matchedSmsIds.contains(smsTx.id) &&
+                    smsTx.accountKey == imp.accountKey &&
+                    smsTx.amount == imp.amount &&
+                    smsTx.persianDateOnly == impDateOnly &&
+                    ((smsTx.type == TransactionType.DEPOSIT) == imp.isDeposit)
             }
         }
 
-        if (matchingSmsIndex != -1) {
-            val existingSms = rawTransactions[matchingSmsIndex]
+        if (matchIdx != -1) {
+            val existingSms = finalTxs[matchIdx]
+            matchedSmsIds.add(existingSms.id)
             val mergedPayer = imp.payerIdentifier.ifBlank { existingSms.payerIdentifier }
             val autoMapping = if (mergedPayer.isNotEmpty()) payerMappings[mergedPayer] else null
             val resolvedUnitId = existingSms.unitId ?: autoMapping?.unitId
@@ -652,7 +609,7 @@ fun readAllTransactionsFast(
             val mergedCat = existingSms.category.ifBlank {
                 if (resolvedUnitId != null && existingSms.scope == "مدیریت ساختمان") "شارژ ماهیانه واحدها" else ""
             }
-            rawTransactions[matchingSmsIndex] = existingSms.copy(
+            finalTxs[matchIdx] = existingSms.copy(
                 payerIdentifier = mergedPayer,
                 unitId = resolvedUnitId,
                 userNote = mergedNote,
@@ -662,16 +619,14 @@ fun readAllTransactionsFast(
             continue
         }
 
-        val targetAccKey = discoveredAccounts.keys.firstOrNull { it.startsWith("$impBankName - ") && !it.endsWith("اصلی") }
-            ?: imp.accountKey
-
-        val profile = discoveredAccounts.getOrPut(targetAccKey) {
+        val impBankName = imp.accountKey.substringBefore(" - ").trim()
+        val profile = discoveredAccounts.getOrPut(imp.accountKey) {
             AccountProfileEntity(
-                accountKey = targetAccKey,
+                accountKey = imp.accountKey,
                 bankName = impBankName,
-                accountNumber = targetAccKey.substringAfter(" - ", "اکسل"),
-                customTitle = targetAccKey,
-                scope = "مدیریت ساختمان"
+                accountNumber = imp.accountKey.substringAfter(" - ", "صورت‌حساب"),
+                customTitle = imp.accountKey,
+                scope = "شخصی"
             )
         }
         val savedEntity = savedNotes[imp.recordId]
@@ -681,13 +636,14 @@ fun readAllTransactionsFast(
         val finalNote = savedEntity?.note?.ifBlank { autoUnitNote.ifBlank { imp.description } } ?: autoUnitNote.ifBlank { imp.description }
         val yearOnly = impDateOnly.substringBefore("/")
 
-        rawTransactions.add(
+        finalTxs.add(
             BankTransaction(
                 id = imp.recordId,
-                sender = "فایل بانکی (اکسل/PDF)",
+                stableKey = imp.recordId,
+                sender = "فایل صورت‌حساب بانکی",
                 bankName = profile.bankName,
                 accountNumber = profile.accountNumber,
-                accountKey = targetAccKey,
+                accountKey = imp.accountKey,
                 scope = profile.scope,
                 payerIdentifier = imp.payerIdentifier,
                 unitId = resolvedUnitId,
@@ -703,12 +659,12 @@ fun readAllTransactionsFast(
                 persianYear = yearOnly,
                 rawMessage = "رکورد صورت‌حساب: ${imp.description}",
                 userNote = finalNote,
-                category = savedEntity?.category ?: if (resolvedUnitId != null) "شارژ ماهیانه واحدها" else ""
+                category = savedEntity?.category ?: if (resolvedUnitId != null && profile.scope == "مدیریت ساختمان") "شارژ ماهیانه واحدها" else ""
             )
         )
     }
 
-    val enrichedTransactions = rawTransactions.map { tx ->
+    val enrichedTransactions = finalTxs.map { tx ->
         if (tx.userNote.isBlank()) {
             val inferred = AutoTransactionDescriber.inferTransactionDetails(tx, allInboxSms)
             if (inferred != null) {

@@ -4,26 +4,27 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- قاب لوگوی تجاری هم‌تراز -->
+    <!-- کارت سفید لوکس مرکزی -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M28,32 C28,28.7 30.7,26 34,26 L74,26 C77.3,26 80,28.7 80,32 L80,76 C80,79.3 77.3,82 74,82 L34,82 C30.7,82 28,79.3 28,76 Z" />
+        android:pathData="M26,32 C26,28.7 28.7,26 32,26 L76,26 C79.3,26 82,28.7 82,32 L82,76 C82,79.3 79.3,82 76,82 L32,82 C28.7,82 26,79.3 26,76 Z" />
     <!-- شاهین ترازو و محور تعادل طلایی -->
     <path
         android:fillColor="#F59E0B"
-        android:pathData="M35,36 L73,36 L73,40 L35,40 Z" />
+        android:pathData="M34,35 L74,35 L74,39 L34,39 Z" />
     <path
         android:fillColor="#F59E0B"
-        android:pathData="M52,31 L56,31 L56,42 L52,42 Z" />
-    <!-- نماد حسابداری مالی (سمت چپ) -->
+        android:pathData="M52,30 L56,30 L56,41 L52,41 Z" />
+    <!-- نمودار مالی شخصی (سمت چپ) -->
     <path
-        android:fillColor="#091E3A"
-        android:pathData="M36,56 L42,56 L42,72 L36,72 Z M45,46 L51,46 L51,72 L45,72 Z" />
-    <!-- نماد برج مسکونی و مجتمع (سمت راست) -->
+        android:fillColor="#071930"
+        android:pathData="M35,56 L41,56 L41,72 L35,72 Z M44,46 L50,46 L50,72 L44,72 Z" />
+    <!-- برج مسکونی و مجتمع (سمت راست) -->
     <path
         android:fillColor="#00796B"
-        android:pathData="M56,44 L72,44 L72,72 L56,72 Z" />
+        android:pathData="M56,44 L73,44 L73,72 L56,72 Z" />
+    <!-- پنجره‌های برج -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M59,48 L62,48 L62,52 L59,52 Z M65,48 L68,48 L68,52 L65,52 Z M59,55 L62,55 L62,59 L59,59 Z M65,55 L68,55 L68,59 L65,59 Z M59,62 L62,62 L62,66 L59,66 Z M65,62 L68,62 L68,66 L65,66 Z" />
+        android:pathData="M59,48 L63,48 L63,52 L59,52 Z M66,48 L70,48 L70,52 L66,52 Z M59,55 L63,55 L63,59 L59,59 Z M66,55 L70,55 L70,59 L66,59 Z M59,62 L63,62 L63,66 L59,66 Z M66,62 L70,62 L70,66 L66,66 Z" />
 </vector>

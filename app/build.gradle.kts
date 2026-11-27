@@ -13,17 +13,21 @@ android {
         applicationId = "com.example.banksmstracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20
-        versionName = "20.0"
+        versionCode = 22
+        versionName = "22.0-Enterprise"
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        debug {
+            isMinifyEnabled = false
         }
     }
     compileOptions {
@@ -62,12 +66,14 @@ dependencies {
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")
     ksp("androidx.room:room-compiler:$roomVersion")
-    // رمزنگاری کامل دیتابیس SQLite با نام کاربری و رمز عبور (SQLCipher)
-    implementation("net.zetetic:android-database-sqlcipher:4.5.4")
+
+    // SQLCipher for full AES-256 database encryption
+    implementation("net.sqlcipher:android-database-sqlcipher:4.5.4")
     implementation("androidx.sqlite:sqlite-ktx:2.4.0")
 
+    // Persian Calendar
     implementation("com.github.samanzamani:PersianDate:1.7.1")
-    implementation("org.apache.poi:poi:5.2.5")
-    implementation("org.apache.poi:poi-ooxml:5.2.5")
-    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+
+    // EXIF orientation handling for receipt images
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 }

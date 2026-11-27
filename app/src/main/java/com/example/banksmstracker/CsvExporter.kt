@@ -14,7 +14,7 @@ object CsvExporter {
         if (transactions.isEmpty()) return
 
         val todayShamsi = PersianDateFormat("Y-m-d_H-i").format(PersianDate())
-        val fileName = "Accounting_Report_${scopeTitle}_$todayShamsi.csv"
+        val fileName = "HamTaraz_Report_${scopeTitle}_$todayShamsi.csv"
 
         val exportDir = File(context.cacheDir, "exports").apply {
             if (!exists()) mkdirs()
@@ -61,7 +61,7 @@ object CsvExporter {
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "text/csv"
             putExtra(Intent.EXTRA_STREAM, uri)
-            putExtra(Intent.EXTRA_SUBJECT, "گزارش حسابداری ($scopeTitle - $todayShamsi)")
+            putExtra(Intent.EXTRA_SUBJECT, "گزارش هم‌تراز ($scopeTitle - $todayShamsi)")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
@@ -71,10 +71,14 @@ object CsvExporter {
     }
 
     private fun escapeCsv(value: String): String {
-        val cleaned = value
+        var cleaned = value
             .replace("\r\n", " ")
             .replace("\n", " ")
+            .replace("\r", " ")
             .replace("\"", "\"\"")
+        if (cleaned.isNotEmpty() && cleaned[0] in listOf('=', '+', '-', '@', '\t')) {
+            cleaned = "'$cleaned"
+        }
         return "\"$cleaned\""
     }
 }

@@ -2,6 +2,12 @@ package com.example.banksmstracker
 
 object UnitCreditAccountingEngine {
 
+    /**
+     * محاسبه دقیق مانده بستانکاری خالص هر واحد:
+     * کل بستانکاری‌ها (واریزی‌های بانکی متصل‌شده + بستانکاری‌های دستی + مانده اولیه مثبت)
+     * منهای کل بدهی‌های ثبت‌شده (بر اساس مبلغ کامل بدهی‌ها + بدهی اولیه).
+     * این فرمول تضمین می‌کند با تسویه مانده بدهی، تراز دقیقاً صفر شود و بستانکاری کاذب ایجاد نگردد.
+     */
     fun computeAvailableCreditPerUnit(
         units: List<BuildingUnitEntity>,
         existingCharges: List<UnitChargeEntity>,
@@ -10,9 +16,9 @@ object UnitCreditAccountingEngine {
     ): Map<Int, Long> {
         val creditMap = mutableMapOf<Int, Long>()
         for (unit in units) {
-            val prevDebits = existingCharges
+            val totalDebits = existingCharges
                 .filter { it.unitId == unit.id }
-                .sumOf { ch -> (ch.remainingBalance ?: (ch.amount - ch.creditApplied)).coerceAtLeast(0L) } +
+                .sumOf { it.amount.coerceAtLeast(0L) } +
                 if (unit.openingBalance < 0) -unit.openingBalance else 0L
 
             val smsCredits = buildingTransactions
@@ -25,12 +31,16 @@ object UnitCreditAccountingEngine {
 
             val initialCredit = if (unit.openingBalance > 0) unit.openingBalance else 0L
             val totalCredits = smsCredits + manualCredits + initialCredit
-            val net = totalCredits - prevDebits
+            val net = totalCredits - totalDebits
             creditMap[unit.id] = if (net > 0L) net else 0L
         }
         return creditMap
     }
 
+    /**
+     * اعمال خودکار بستانکاری موجود هر واحد روی بدهی‌های جدید ماه/دوره:
+     * بستانکاری موجود از بدهی جدید کسر می‌شود، مانده بدهی آن ردیف محاسبه و در عنوان ثبت می‌گردد.
+     */
     fun applyExistingCreditToNewCharges(
         draftCharges: List<UnitChargeEntity>,
         units: List<BuildingUnitEntity>,
@@ -80,5 +90,12 @@ object UnitCreditAccountingEngine {
                 )
             }
         }
+    }
+
+    fun splitExact(totalAmount: Long, count: Int): List<Long> {
+        if (count <= 0) return emptyList()
+        val base = totalAmount / count
+        val remainder = totalAmount % count
+        return List(count) { idx -> if (idx == 0) base + remainder else base }
     }
 }

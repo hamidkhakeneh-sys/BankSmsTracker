@@ -1496,7 +1496,7 @@ fun DeclareBuildingDebtDialog(
                         UnitChargeEntity(unitId = u.id, amount = u.monthlyCharge, title = title.trim(), persianDate = dateStr, persianMonthYear = monthStr, timestampMillis = now)
                     }
                     1 -> {
-                        val perUnit = if (totalAmt > 0) totalAmt / targetUnits.size else 0L
+                        val perUnit = 0L
                         targetUnits.map { u ->
                             UnitChargeEntity(unitId = u.id, amount = perUnit, title = title.trim(), persianDate = dateStr, persianMonthYear = monthStr, timestampMillis = now)
                         }
@@ -1941,9 +1941,9 @@ fun BuildingExpenseWithSplitDialog(
                         val targetUnits = units.filter { selectedUnitIds.contains(it.id) }
                         when (splitMode) {
                             0 -> {
-                                val perUnit = amt / targetUnits.size
-                                targetUnits.map { u ->
-                                    UnitChargeEntity(unitId = u.id, amount = perUnit, title = "سهم هزینه: $cleanTitle", persianDate = dateOnlyStr, persianMonthYear = monthStr, timestampMillis = now)
+                                val shares = UnitCreditAccountingEngine.splitExact(amt, targetUnits.size)
+                                targetUnits.mapIndexed { idx, u ->
+                                    UnitChargeEntity(unitId = u.id, amount = shares[idx], title = "سهم هزینه: $cleanTitle", persianDate = dateOnlyStr, persianMonthYear = monthStr, timestampMillis = now)
                                 }
                             }
                             1 -> {

@@ -2,6 +2,8 @@ package com.example.banksmstracker
 
 import android.content.Context
 import androidx.room.*
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Entity(tableName = "transaction_notes")
 data class TransactionNoteEntity(
@@ -29,11 +31,10 @@ data class PayerUnitMappingEntity(
     val unitTitle: String
 )
 
-// نگاشت دائمی شماره حساب استخراج‌شده از پیامک به یکی از بانک‌های ایران (انتخابی توسط کاربر)
 @Entity(tableName = "account_bank_mappings")
 data class AccountBankMappingEntity(
-    @PrimaryKey val rawAccountNumber: String, // مثلاً "361970003195155001" یا "3195155"
-    val bankName: String                      // مثلاً "بانک قرض‌الحسنه مهر ایران"
+    @PrimaryKey val rawAccountNumber: String,
+    val bankName: String
 )
 
 @Entity(tableName = "building_units")
@@ -44,27 +45,10 @@ data class BuildingUnitEntity(
     val monthlyCharge: Long,
     val phoneNumber: String = "",
     val openingBalance: Long = 0L,
-    val floor: String = "",          // طبقه (مثلاً: طبقه یک)
-    val areaSqm: Int = 0,            // متراژ (متر مربع)
-    val residentCount: Int = 1,      // تعداد نفرات ساکن
-    val roleType: String = "ساکن"    // مالک، ساکن، واحد خالی
-)
-
-// ثبت دستی هزینه‌ها، درآمدهای نقدی صندوق و بستانکاری مستقیم واحدها (الهام‌گرفته از شارژمام)
-@Entity(tableName = "manual_building_entries")
-data class ManualBuildingEntryEntity(
-    @PrimaryKey(autoGenerate = true) val id: Int = 0,
-    val entryType: String,           // "EXPENSE" (هزینه نقدی), "INCOME" (درآمد صندوق), "UNIT_CREDIT" (بستانکاری مستقیم واحد)
-    val title: String,
-    val amount: Long,
-    val category: String = "",
-    val unitId: Int? = null,         // برای بستانکاری مستقیم واحد
-    val targetRole: String = "ساکن", // ساکن، مالک، واحد خالی
-    val receiptImagePath: String = "",
-    val note: String = "",
-    val persianDate: String,
-    val persianMonthYear: String,
-    val timestampMillis: Long
+    val floor: String = "",
+    val areaSqm: Int = 0,
+    val residentCount: Int = 1,
+    val roleType: String = "مستاجر"
 )
 
 @Entity(tableName = "unit_charges")
@@ -79,6 +63,22 @@ data class UnitChargeEntity(
     val persianMonthYear: String,
     val timestampMillis: Long,
     val isAutoMonthly: Boolean = false
+)
+
+@Entity(tableName = "manual_building_entries")
+data class ManualBuildingEntryEntity(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val entryType: String,
+    val title: String,
+    val amount: Long,
+    val category: String = "",
+    val unitId: Int? = null,
+    val targetRole: String = "ساکن",
+    val receiptImagePath: String = "",
+    val note: String = "",
+    val persianDate: String,
+    val persianMonthYear: String,
+    val timestampMillis: Long
 )
 
 @Entity(tableName = "imported_bank_records")
@@ -132,6 +132,9 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun saveAccountProfile(profile: AccountProfileEntity)
 
+    @Query("DELETE FROM account_profiles WHERE accountKey = :accountKey")
+    suspend fun deleteAccountProfile(accountKey: String)
+
     @Query("SELECT * FROM payer_unit_mappings")
     suspend fun getAllPayerMappings(): List<PayerUnitMappingEntity>
 
@@ -141,7 +144,6 @@ interface AppDao {
     @Query("DELETE FROM payer_unit_mappings WHERE payerIdentifier = :payerId")
     suspend fun deletePayerMapping(payerId: String)
 
-    // نگاشت شماره حساب به بانک
     @Query("SELECT * FROM account_bank_mappings")
     suspend fun getAllAccountBankMappings(): List<AccountBankMappingEntity>
 
@@ -169,7 +171,6 @@ interface AppDao {
     @Query("DELETE FROM unit_charges WHERE id = :chargeId")
     suspend fun deleteUnitCharge(chargeId: Int)
 
-    // عملیات دستی صندوق ساختمان (هزینه، درآمد، بستانکاری مستقیم واحدها)
     @Query("SELECT * FROM manual_building_entries ORDER BY timestampMillis DESC")
     suspend fun getAllManualBuildingEntries(): List<ManualBuildingEntryEntity>
 
@@ -230,7 +231,7 @@ interface AppDao {
         CategoryEntity::class,
         AppSettingEntity::class
     ],
-    version = 16,
+    version = 1,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -261,20 +262,21 @@ abstract class AppDatabase : RoomDatabase() {
             CategoryEntity("تعمیرات عمومی ساختمان", true, "مدیریت ساختمان")
         )
 
-        fun getDatabase(context: Context, passphrase: ByteArray? = null): AppDatabase {
+        /**
+         * باز کردن امن دیتابیس رمزنگاری‌شده SQLCipher:
+         * بدون کلید معتبر هرگز اجرا نمی‌شود تا از حذف تصادفی دیتابیس جلوگیری گردد.
+         */
+        fun getDatabase(context: Context, passphrase: ByteArray): AppDatabase {
+            require(passphrase.isNotEmpty()) { "Database passphrase is required" }
             return INSTANCE ?: synchronized(this) {
-                val builder = Room.databaseBuilder(
+                val factory = net.sqlcipher.database.SupportFactory(passphrase)
+                val instance = Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
-                    "hamtaraz_encrypted_v16_db"
-                ).fallbackToDestructiveMigration()
-
-                if (passphrase != null && passphrase.isNotEmpty()) {
-                    val factory = net.sqlcipher.database.SupportFactory(passphrase)
-                    builder.openHelperFactory(factory)
-                }
-
-                val instance = builder.build()
+                    "hamtaraz_enterprise_vault.db"
+                )
+                    .openHelperFactory(factory)
+                    .build()
                 INSTANCE = instance
                 instance
             }

@@ -20,68 +20,138 @@ import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import java.security.MessageDigest
+import java.security.SecureRandom
 import java.text.NumberFormat
 import java.util.Locale
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
 
-// ============================================================================
-// ۱. مدیریت امنیت دیتابیس با نام کاربری و رمز عبور (SQLCipher Passphrase)
-// ============================================================================
 object DatabaseSecurityManager {
-    private const val PREFS_NAME = "hamtaraz_secure_vault"
+    private const val PREFS_NAME = "hamtaraz_secure_vault_v2"
     private const val KEY_USERNAME = "db_username"
+    private const val KEY_SALT_HEX = "db_salt_hex"
     private const val KEY_PASS_HASH = "db_pass_hash"
+    private const val KEY_FAILED_ATTEMPTS = "db_failed_attempts"
+    private const val KEY_LOCK_UNTIL = "db_lock_until_ms"
+    private const val KEY_FLAG_SECURE = "flag_secure_enabled"
 
     fun isCredentialsConfigured(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return !prefs.getString(KEY_USERNAME, null).isNullOrBlank() &&
-                !prefs.getString(KEY_PASS_HASH, null).isNullOrBlank()
+                !prefs.getString(KEY_PASS_HASH, null).isNullOrBlank() &&
+                !prefs.getString(KEY_SALT_HEX, null).isNullOrBlank()
     }
 
     fun getSavedUsername(context: Context): String {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getString(KEY_USERNAME, "") ?: ""
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_USERNAME, "") ?: ""
+    }
+
+    fun isScreenPrivacyEnabled(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_FLAG_SECURE, false)
+    }
+
+    fun setScreenPrivacyEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_FLAG_SECURE, enabled)
+            .apply()
+    }
+
+    fun getRemainingLockSeconds(context: Context): Long {
+        val lockUntil = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_LOCK_UNTIL, 0L)
+        val diffMs = lockUntil - System.currentTimeMillis()
+        return if (diffMs > 0L) (diffMs / 1000L) + 1L else 0L
     }
 
     fun setupCredentials(context: Context, username: String, password: String): ByteArray {
         val cleanUser = username.trim()
-        val hash = sha256("$cleanUser:$password:HamTarazVault2026")
+        val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        val saltHex = salt.joinToString("") { "%02x".format(it) }
+        val authVerifier = pbkdf2(password, salt, iterations = 120_000, keyLenBits = 256)
+            .joinToString("") { "%02x".format(it) }
+
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_USERNAME, cleanUser)
-            .putString(KEY_PASS_HASH, hash)
+            .putString(KEY_SALT_HEX, saltHex)
+            .putString(KEY_PASS_HASH, authVerifier)
+            .putInt(KEY_FAILED_ATTEMPTS, 0)
+            .putLong(KEY_LOCK_UNTIL, 0L)
             .apply()
-        return deriveSqlCipherKey(cleanUser, password)
+
+        return pbkdf2("$cleanUser:$password", salt, iterations = 120_000, keyLenBits = 256)
     }
 
-    fun verifyAndDeriveKey(context: Context, username: String, password: String): ByteArray? {
+    fun verifyAndDeriveKey(context: Context, username: String, password: String): Pair<ByteArray?, String> {
+        val lockSec = getRemainingLockSeconds(context)
+        if (lockSec > 0L) {
+            return Pair(null, "تلاش‌های ناموفق زیاد بود. لطفاً $lockSec ثانیه صبر کنید.")
+        }
+
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val savedUser = prefs.getString(KEY_USERNAME, "") ?: ""
         val savedHash = prefs.getString(KEY_PASS_HASH, "") ?: ""
-        val cleanUser = username.trim()
-        if (cleanUser != savedUser) return null
-        val candidateHash = sha256("$cleanUser:$password:HamTarazVault2026")
-        return if (candidateHash == savedHash) {
-            deriveSqlCipherKey(cleanUser, password)
+        val saltHex = prefs.getString(KEY_SALT_HEX, "") ?: ""
+
+        if (username.trim() != savedUser || saltHex.isEmpty()) {
+            recordFailedAttempt(context)
+            return Pair(null, "نام کاربری یا رمز عبور اشتباه است!")
+        }
+
+        val salt = hexToBytes(saltHex)
+        val candidateHash = pbkdf2(password, salt, iterations = 120_000, keyLenBits = 256)
+            .joinToString("") { "%02x".format(it) }
+
+        return if (constantTimeEquals(candidateHash, savedHash)) {
+            prefs.edit().putInt(KEY_FAILED_ATTEMPTS, 0).putLong(KEY_LOCK_UNTIL, 0L).apply()
+            val dbKey = pbkdf2("${username.trim()}:$password", salt, iterations = 120_000, keyLenBits = 256)
+            Pair(dbKey, "")
         } else {
-            null
+            recordFailedAttempt(context)
+            Pair(null, "نام کاربری یا رمز عبور اشتباه است!")
         }
     }
 
-    private fun deriveSqlCipherKey(username: String, password: String): ByteArray {
-        return sha256("SQLCIPHER_KEY_${username}_$password").toByteArray(Charsets.UTF_8)
+    private fun recordFailedAttempt(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val attempts = prefs.getInt(KEY_FAILED_ATTEMPTS, 0) + 1
+        val editor = prefs.edit().putInt(KEY_FAILED_ATTEMPTS, attempts)
+        if (attempts >= 5) {
+            editor.putLong(KEY_LOCK_UNTIL, System.currentTimeMillis() + 30_000L)
+            editor.putInt(KEY_FAILED_ATTEMPTS, 0)
+        }
+        editor.apply()
     }
 
-    private fun sha256(input: String): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        val bytes = digest.digest(input.toByteArray(Charsets.UTF_8))
-        return bytes.joinToString("") { "%02x".format(it) }
+    private fun pbkdf2(secret: String, salt: ByteArray, iterations: Int, keyLenBits: Int): ByteArray {
+        val spec = PBEKeySpec(secret.toCharArray(), salt, iterations, keyLenBits)
+        return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+    }
+
+    private fun hexToBytes(hex: String): ByteArray {
+        val len = hex.length
+        val out = ByteArray(len / 2)
+        var i = 0
+        while (i < len) {
+            out[i / 2] = ((Character.digit(hex[i], 16) shl 4) + Character.digit(hex[i + 1], 16)).toByte()
+            i += 2
+        }
+        return out
+    }
+
+    private fun constantTimeEquals(a: String, b: String): Boolean {
+        if (a.length != b.length) return false
+        var diff = 0
+        for (i in a.indices) {
+            diff = diff or (a[i].code xor b[i].code)
+        }
+        return diff == 0
     }
 }
 
-// ============================================================================
-// ۲. تبدیل عدد به حروف فارسی و معادل تومان (برای نمایش زیر فیلدهای مبلغی)
-// ============================================================================
 object PersianNumberToWords {
     private val ones = listOf("", "یک", "دو", "سه", "چهار", "پنج", "شش", "هفت", "هشت", "نه")
     private val teens = listOf("ده", "یازده", "دوازده", "سیزده", "چهارده", "پانزده", "شانزده", "هفده", "هجده", "نوزده")
@@ -141,9 +211,6 @@ object PersianNumberToWords {
     }
 }
 
-/**
- * تبدیل ظاهری ارقام به فرمت سه‌رقمی جداشده با کاما (1,250,000) هنگام تایپ کاربر
- */
 class ThousandSeparatorTransformation : VisualTransformation {
     override fun filter(text: AnnotatedString): TransformedText {
         val raw = text.text
@@ -188,10 +255,6 @@ class ThousandSeparatorTransformation : VisualTransformation {
     }
 }
 
-/**
- * کامپوننت استاندارد فیلد مبلغی (ریال):
- * دارای جداکننده هزارگان حین تایپ + باکس نمایش لحظه‌ای مبلغ به حروف و معادل تومان در زیر فیلد
- */
 @Composable
 fun RialAmountTextField(
     rawDigitsValue: String,
@@ -259,10 +322,7 @@ fun RialAmountTextField(
     }
 }
 
-// ============================================================================
-// ۳. باز کردن مستقیم پیامک در اپلیکیشن پیام‌رسان پیش‌فرض گوشی
-// ============================================================================
-fun openSmsInPhoneApp(context: Context, smsId: String, senderAddress: String) {
+fun openSmsInPhoneApp(context: Context, senderAddress: String) {
     try {
         val cleanSender = senderAddress.trim()
         if (cleanSender.isNotEmpty() && cleanSender != "نامشخص" && !cleanSender.contains("فایل")) {
@@ -284,25 +344,4 @@ fun openSmsInPhoneApp(context: Context, smsId: String, senderAddress: String) {
             }
         }
     } catch (_: Exception) { }
-}
-
-private fun getSmsThreadId(context: Context, smsId: Long): Long? {
-    return try {
-        val cursor = context.contentResolver.query(
-            Telephony.Sms.Inbox.CONTENT_URI,
-            arrayOf(Telephony.Sms.THREAD_ID),
-            "${Telephony.Sms._ID} = ?",
-            arrayOf(smsId.toString()),
-            null
-        )
-        cursor?.use {
-            if (it.moveToFirst()) {
-                val idx = it.getColumnIndex(Telephony.Sms.THREAD_ID)
-                if (idx != -1) return it.getLong(idx)
-            }
-        }
-        null
-    } catch (e: Exception) {
-        null
-    }
 }

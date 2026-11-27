@@ -80,6 +80,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (DatabaseSecurityManager.isScreenPrivacyEnabled(this)) {
+            window.setFlags(
+                android.view.WindowManager.LayoutParams.FLAG_SECURE,
+                android.view.WindowManager.LayoutParams.FLAG_SECURE
+            )
+        }
         notificationSmsId = intent?.getStringExtra(BackgroundSmsReceiver.EXTRA_SMS_ID)
 
         setContent {
@@ -196,7 +202,8 @@ fun HolooSmsAccountingApp(
     var unitCharges by remember { mutableStateOf<List<UnitChargeEntity>>(emptyList()) }
     var manualBuildingEntries by remember { mutableStateOf<List<ManualBuildingEntryEntity>>(emptyList()) }
     var buildingName by remember { mutableStateOf("ساختمان من") }
-    var autoMonthlyChargeEnabled by remember { mutableStateOf(true) }
+    var autoMonthlyChargeEnabled by remember { mutableStateOf(false) }
+    var hasCheckedAutoMonthlyCharge by remember { mutableStateOf(false) }
     var smsFromYearMonth by remember { mutableStateOf("همه") }
     var customScopes by remember { mutableStateOf<List<String>>(listOf("شخصی", "مدیریت ساختمان")) }
 
@@ -337,13 +344,14 @@ fun HolooSmsAccountingApp(
 
                 val loadedUnits = appDao.getAllBuildingUnits()
                 var loadedCharges = appDao.getAllUnitCharges()
-                val isAutoChargeOn = settingsMap["auto_monthly_charge"]?.toBooleanStrictOrNull() ?: true
+                val isAutoChargeOn = settingsMap["auto_monthly_charge"]?.toBooleanStrictOrNull() ?: false
                 autoMonthlyChargeEnabled = isAutoChargeOn
                 val savedFromYm = settingsMap["sms_from_ym"]
                 if (!savedFromYm.isNullOrBlank()) smsFromYearMonth = savedFromYm
 
-                // صدور خودکار شارژ ماهانه در تاریخ ۱ ماه جاری برای تمام واحدها (در صورت فعال بودن)
-                if (isAutoChargeOn && loadedUnits.isNotEmpty()) {
+                // صدور خودکار شارژ ماهانه در تاریخ ۱ ماه جاری (فقط یک‌بار در هر نشست و در صورت فعال‌سازی کاربر)
+                if (isAutoChargeOn && !hasCheckedAutoMonthlyCharge && loadedUnits.isNotEmpty()) {
+                    hasCheckedAutoMonthlyCharge = true
                     val pNow = PersianDate()
                     val currentMonthKey = PersianDateFormat("Y/m").format(pNow) // مثلاً "1405/09"
                     val firstDayOfMonthDate = "$currentMonthKey/01"
@@ -371,7 +379,7 @@ fun HolooSmsAccountingApp(
                             units = loadedUnits,
                             existingCharges = loadedCharges,
                             manualEntries = appDao.getAllManualBuildingEntries(),
-                            buildingTransactions = emptyList()
+                            buildingTransactions = allTransactions.filter { it.scope == "مدیریت ساختمان" }
                         )
                         appDao.insertUnitCharges(adjustedAutoCharges)
                         loadedCharges = appDao.getAllUnitCharges()
@@ -388,6 +396,7 @@ fun HolooSmsAccountingApp(
                 ignoredItems = ignoredList
                 val ignoredIds = ignoredList.filter { !it.isSenderBlocked }.map { it.keyId }.toSet()
                 val blockedSenders = ignoredList.filter { it.isSenderBlocked }.map { it.keyId }.toSet()
+                BackgroundSmsReceiver.syncBlockedSenders(context, blockedSenders)
 
                 val bankMappingsList = appDao.getAllAccountBankMappings()
                 accountBankMappings = bankMappingsList
@@ -738,8 +747,12 @@ fun HolooSmsAccountingApp(
                             },
                             onDeleteUnit = { unitId ->
                                 coroutineScope.launch(Dispatchers.IO) {
+                                    appDao.getAllUnitCharges().filter { it.unitId == unitId }.forEach { appDao.deleteUnitCharge(it.id) }
+                                    appDao.getAllPayerMappings().filter { it.unitId == unitId }.forEach { appDao.deletePayerMapping(it.payerIdentifier) }
                                     appDao.deleteBuildingUnit(unitId)
                                     buildingUnits = appDao.getAllBuildingUnits()
+                                    unitCharges = appDao.getAllUnitCharges()
+                                    payerMappings = appDao.getAllPayerMappings()
                                 }
                             },
                             onDeclareDebtBatch = { chargesList ->
@@ -880,7 +893,8 @@ fun HolooSmsAccountingApp(
                                     } else tx
                                 }
                                 val profilesMap = accountProfiles.associateBy { it.accountKey }
-                                val (recomputedTxs, recomputedProfiles) = IranBankSmsParser.recomputeBankAccountRoles(updatedRawList, profilesMap)
+                                val mapEntry = mapOf(rawAccKey to chosenBank, coreDigits to chosenBank)
+                    val (recomputedTxs, recomputedProfiles) = IranBankSmsParser.applyAccountBankMappingsInMemory(allTransactions, mapEntry, profilesMap)
                                 allTransactions = recomputedTxs
                                 accountProfiles = recomputedProfiles
 
@@ -951,7 +965,8 @@ fun HolooSmsAccountingApp(
                         } else tx
                     }
                     val profilesMap = accountProfiles.associateBy { it.accountKey }
-                    val (recomputedTxs, recomputedProfiles) = IranBankSmsParser.recomputeBankAccountRoles(updatedRawList, profilesMap)
+                    val mapEntry = mapOf(rawAccKey to chosenBank, coreDigits to chosenBank)
+                    val (recomputedTxs, recomputedProfiles) = IranBankSmsParser.applyAccountBankMappingsInMemory(allTransactions, mapEntry, profilesMap)
                     allTransactions = recomputedTxs
                     accountProfiles = recomputedProfiles
 
@@ -1025,7 +1040,7 @@ fun HolooSmsAccountingApp(
                     coroutineScope.launch(Dispatchers.IO) {
                         appDao.saveNote(
                             TransactionNoteEntity(
-                                smsId = currentTx.id,
+                                smsId = currentTx.stableKey.ifBlank { currentTx.id },
                                 note = autoUnitLabel,
                                 category = newCategory,
                                 isInternalTransferOverride = transferOverride,
@@ -2471,7 +2486,7 @@ fun TransactionDetailDialog(
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { openSmsInPhoneApp(context, transaction.id, transaction.sender) }
+                        .clickable { openSmsInPhoneApp(context, transaction.sender) }
                 ) {
                     Column(modifier = Modifier.padding(10.dp)) {
                         Text(transaction.rawMessage, style = MaterialTheme.typography.bodySmall)
@@ -2817,7 +2832,9 @@ fun TransactionDetailDialog(
                 }
 
                 if (receiptPath.isNotEmpty()) {
-                    val bitmap = remember(receiptPath) { BitmapFactory.decodeFile(receiptPath) }
+                    val bitmap = remember(receiptPath) {
+                        ImageReceiptHelper.resolveReceiptFile(context, receiptPath)?.let { BitmapFactory.decodeFile(it.absolutePath) }
+                    }
                     if (bitmap != null) {
                         Spacer(modifier = Modifier.height(8.dp))
                         Box(modifier = Modifier.fillMaxWidth()) {
@@ -2831,7 +2848,10 @@ fun TransactionDetailDialog(
                                     .clip(RoundedCornerShape(10.dp))
                             )
                             IconButton(
-                                onClick = { receiptPath = "" },
+                                onClick = {
+                                    ImageReceiptHelper.deleteReceiptFile(context, receiptPath)
+                                    receiptPath = ""
+                                },
                                 modifier = Modifier
                                     .align(Alignment.TopEnd)
                                     .padding(4.dp)
@@ -3349,11 +3369,11 @@ fun DatabaseAuthGateScreen(
                             val key = DatabaseSecurityManager.setupCredentials(context, username, password)
                             onUnlocked(key)
                         } else {
-                            val key = DatabaseSecurityManager.verifyAndDeriveKey(context, username, password)
+                            val (key, errMsg) = DatabaseSecurityManager.verifyAndDeriveKey(context, username, password)
                             if (key != null) {
                                 onUnlocked(key)
                             } else {
-                                errorMessage = "نام کاربری یا رمز عبور اشتباه است!"
+                                errorMessage = errMsg.ifBlank { "نام کاربری یا رمز عبور اشتباه است!" }
                             }
                         }
                     },

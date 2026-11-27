@@ -46,7 +46,7 @@ object AutoTransactionDescriber {
         val normBody = IranBankSmsParser.normalizePersian(tx.rawMessage)
         val lowerBody = normBody.lowercase()
 
-        val windowMillis = 5 * 60 * 1000L
+        val windowMillis = 3 * 60 * 1000L
         val nearbySmsList = allInboxSms.filter { sms ->
             sms.id != tx.id &&
             abs(sms.timestampMillis - tx.timestampMillis) <= windowMillis &&
@@ -58,8 +58,6 @@ object AutoTransactionDescriber {
             append(normBody)
             append(" ")
             nearbySmsList.forEach {
-                append(IranBankSmsParser.normalizePersian(it.sender))
-                append(" ")
                 append(IranBankSmsParser.normalizePersian(it.body))
                 append(" ")
             }
@@ -78,7 +76,7 @@ object AutoTransactionDescriber {
         val urlMatch = urlRegex.find(combinedContext)
         if (urlMatch != null && tx.type == TransactionType.WITHDRAWAL) {
             val domain = urlMatch.groupValues[1].lowercase()
-            val isBankDomain = listOf("bmi.ir", "mellat", "saderat", "tejarat", "sepah", "saman", "bpi.ir", "shaparak", "rqb.ir").any { domain.contains(it) }
+            val isBankDomain = listOf("bmi.ir", "mellat", "saderat", "tejarat", "sepah", "saman", "bpi.ir", "shaparak", "rqb.ir", "qmb.ir").any { domain.contains(it) }
             if (!isBankDomain) {
                 return AutoDescriptionResult(
                     autoNote = "خرید اینترنتی از سایت $domain",

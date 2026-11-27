@@ -2,16 +2,10 @@ package com.example.banksmstracker
 
 import android.content.Context
 import android.net.Uri
-import android.provider.OpenableColumns
-import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
-import com.tom_roush.pdfbox.pdmodel.PDDocument
-import com.tom_roush.pdfbox.text.PDFTextStripper
-import org.apache.poi.ss.usermodel.DataFormatter
-import org.apache.poi.ss.usermodel.WorkbookFactory
 import saman.zamani.persiandate.PersianDate
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import kotlin.math.abs
+import java.nio.charset.Charset
 
 object ExcelImporter {
 
@@ -26,96 +20,36 @@ object ExcelImporter {
         targetAccountKey: String,
         existingTransactions: List<BankTransaction>
     ): List<ImportedRecordEntity> {
-        val fileName = getFileName(context, uri).lowercase()
-        val rows: List<List<String>> = when {
-            fileName.endsWith(".pdf") -> extractRowsFromPdf(context, uri)
-            fileName.endsWith(".xls") || fileName.endsWith(".xlsx") -> extractRowsFromExcel(context, uri)
-            else -> {
-                try {
-                    extractRowsFromExcel(context, uri)
-                } catch (e: Exception) {
-                    extractRowsFromCsv(context, uri)
-                }
-            }
+        val rows = try {
+            extractRowsFromTextOrCsv(context, uri)
+        } catch (_: Throwable) {
+            emptyList()
         }
-
         return processParsedRows(rows, targetAccountKey, existingTransactions)
     }
 
-    private fun extractRowsFromExcel(context: Context, uri: Uri): List<List<String>> {
-        val allRows = mutableListOf<List<String>>()
-        val formatter = DataFormatter()
-        context.contentResolver.openInputStream(uri)?.use { inputStream ->
-            val workbook = WorkbookFactory.create(inputStream)
-            val sheet = workbook.getSheetAt(0)
-            for (row in sheet) {
-                val rowValues = mutableListOf<String>()
-                val lastCell = row.lastCellNum.toInt().coerceAtLeast(0)
-                for (c in 0 until lastCell) {
-                    val cell = row.getCell(c)
-                    val text = if (cell != null) formatter.formatCellValue(cell) else ""
-                    rowValues.add(IranBankSmsParser.normalizePersian(text.trim()))
-                }
-                if (rowValues.any { it.isNotBlank() }) {
-                    allRows.add(rowValues)
-                }
+    private fun extractRowsFromTextOrCsv(context: Context, uri: Uri): List<List<String>> {
+        val rawBytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return emptyList()
+        if (rawBytes.isEmpty()) return emptyList()
+
+        // تشخیص خودکار UTF-8 در برابر Windows-1256 (فارسی ویندوز در خروجی‌های بانکی)
+        val decodedText = try {
+            val utf8Str = String(rawBytes, Charsets.UTF_8)
+            if (utf8Str.contains('\uFFFD')) {
+                String(rawBytes, Charset.forName("windows-1256"))
+            } else {
+                utf8Str
             }
-            workbook.close()
+        } catch (_: Throwable) {
+            String(rawBytes, Charsets.UTF_8)
         }
-        return allRows
-    }
 
-    private fun extractRowsFromCsv(context: Context, uri: Uri): List<List<String>> {
         val allRows = mutableListOf<List<String>>()
-        context.contentResolver.openInputStream(uri)?.use { inputStream ->
-            val reader = BufferedReader(InputStreamReader(inputStream, Charsets.UTF_8))
-            reader.forEachLine { rawLine ->
-                val line = IranBankSmsParser.normalizePersian(rawLine.replace("\uFEFF", ""))
-                val cols = splitCsvLine(line)
-                if (cols.any { it.isNotBlank() }) {
-                    allRows.add(cols)
-                }
-            }
-        }
-        return allRows
-    }
-
-    private fun extractRowsFromPdf(context: Context, uri: Uri): List<List<String>> {
-        PDFBoxResourceLoader.init(context.applicationContext)
-        val allRows = mutableListOf<List<String>>()
-        context.contentResolver.openInputStream(uri)?.use { inputStream ->
-            val doc = PDDocument.load(inputStream)
-            val stripper = PDFTextStripper()
-            val fullText = IranBankSmsParser.normalizePersian(stripper.getText(doc))
-            doc.close()
-
-            val dateRegex = Regex("""(1[34]\d{2}/\d{1,2}/\d{1,2})""")
-            val numRegex = Regex("""([\d,]{4,15})""")
-
-            fullText.lines().forEach { line ->
-                val dateMatch = dateRegex.find(line)
-                if (dateMatch != null) {
-                    val dateStr = dateMatch.groupValues[1]
-                    val numbers = numRegex.findAll(line.replace(dateStr, ""))
-                        .map { it.groupValues[1].replace(",", "").toLongOrNull() ?: 0L }
-                        .filter { it >= 100L }
-                        .toList()
-
-                    if (numbers.isNotEmpty()) {
-                        val isDep = line.contains("واریز") || line.contains("بستانکار") || line.contains("+")
-                        val amount = numbers.first()
-                        val balance = if (numbers.size >= 2) numbers.last() else 0L
-                        allRows.add(
-                            listOf(
-                                dateStr,
-                                if (isDep) "واریز" else "برداشت",
-                                amount.toString(),
-                                line.trim(),
-                                balance.toString()
-                            )
-                        )
-                    }
-                }
+        BufferedReader(InputStreamReader(decodedText.byteInputStream(Charsets.UTF_8), Charsets.UTF_8)).forEachLine { rawLine ->
+            val line = IranBankSmsParser.normalizePersian(rawLine.replace("\uFEFF", ""))
+            val cols = splitDelimitedLine(line)
+            if (cols.any { it.isNotBlank() }) {
+                allRows.add(cols)
             }
         }
         return allRows
@@ -127,31 +61,6 @@ object ExcelImporter {
         existingTransactions: List<BankTransaction>
     ): List<ImportedRecordEntity> {
         val newRecords = mutableListOf<ImportedRecordEntity>()
-
-        var detectedShortAcc = ""
-        for (i in 0 until minOf(10, rows.size)) {
-            val rowStr = rows[i].joinToString(" ")
-            val accMatch = Regex("""(?:شماره حساب|حساب)\s*[:=\-]?\s*(\d{5,18})""").find(rowStr)
-            if (accMatch != null) {
-                detectedShortAcc = accMatch.groupValues[1].takeLast(5)
-                break
-            }
-        }
-
-        val resolvedAccountKey = if (detectedShortAcc.isNotEmpty()) {
-            existingTransactions.firstOrNull { it.accountKey.endsWith(detectedShortAcc) }?.accountKey
-                ?: selectedAccountKey
-        } else {
-            selectedAccountKey
-        }
-
-        val targetBankName = resolvedAccountKey.substringBefore(" - ").trim()
-        val sameBankTransactions = existingTransactions.filter {
-            it.accountKey == resolvedAccountKey ||
-            it.bankName == targetBankName ||
-            it.bankName.contains(targetBankName.removePrefix("بانک ")) ||
-            targetBankName.contains(it.bankName.removePrefix("بانک "))
-        }
 
         var headerRowIndex = -1
         var dateCol = -1
@@ -193,6 +102,7 @@ object ExcelImporter {
         }
 
         val startRow = if (headerRowIndex != -1) headerRowIndex + 1 else 0
+        val existingRecordIds = existingTransactions.map { it.id }.toSet()
 
         for (r in startRow until rows.size) {
             val cols = rows[r]
@@ -212,12 +122,13 @@ object ExcelImporter {
             var amount = 0L
 
             if (amountCol != -1 && typeCol != -1) {
-                amount = parseCleanLong(cols.getOrNull(amountCol))
+                val signedAmt = parseSignedLong(cols.getOrNull(amountCol))
+                amount = kotlin.math.abs(signedAmt)
                 val typeStr = cols.getOrNull(typeCol)?.trim() ?: ""
-                isDeposit = typeStr.contains("واریز") || typeStr.contains("بستانکار") || typeStr.contains("+")
+                isDeposit = typeStr.contains("واریز") || typeStr.contains("بستانکار") || typeStr.contains("+") || signedAmt > 0 && !typeStr.contains("برداشت") && !typeStr.contains("بدهکار")
             } else if (debitCol != -1 || creditCol != -1) {
-                val deb = if (debitCol != -1) parseCleanLong(cols.getOrNull(debitCol)) else 0L
-                val cred = if (creditCol != -1) parseCleanLong(cols.getOrNull(creditCol)) else 0L
+                val deb = if (debitCol != -1) kotlin.math.abs(parseSignedLong(cols.getOrNull(debitCol))) else 0L
+                val cred = if (creditCol != -1) kotlin.math.abs(parseSignedLong(cols.getOrNull(creditCol))) else 0L
                 if (cred > 0) {
                     isDeposit = true
                     amount = cred
@@ -227,14 +138,15 @@ object ExcelImporter {
                 }
             } else {
                 val typeStr = cols.getOrNull(1) ?: ""
+                val signedAmt = parseSignedLong(cols.getOrNull(2))
                 isDeposit = typeStr.contains("واریز") || typeStr.contains("بستانکار")
-                amount = parseCleanLong(cols.getOrNull(2))
+                amount = kotlin.math.abs(signedAmt)
             }
 
             if (amount < 100L) continue
 
-            val balAmt = if (balanceCol != -1) parseCleanLong(cols.getOrNull(balanceCol))
-            else parseCleanLong(cols.lastOrNull())
+            val balAmt = if (balanceCol != -1) parseSignedLong(cols.getOrNull(balanceCol))
+            else parseSignedLong(cols.lastOrNull())
 
             val descPart = if (descCol != -1) cols.getOrNull(descCol)?.trim() ?: "" else cols.getOrNull(3)?.trim() ?: ""
             val detailsPart = if (detailsCol != -1) cols.getOrNull(detailsCol)?.trim() ?: "" else ""
@@ -255,23 +167,15 @@ object ExcelImporter {
                 else -> combinedFullText.take(60)
             }
 
-            val alreadyExists = sameBankTransactions.any { existing ->
-                val sameType = (existing.type == TransactionType.DEPOSIT) == isDeposit ||
-                        existing.type == TransactionType.INTERNAL
-                val sameAmount = existing.amount == amount
-                val sameDate = existing.persianDateOnly == normalizedDate
-                val sameBalance = balAmt > 0 && existing.balance != null && abs(existing.balance - balAmt) <= 10L
-                (sameDate && sameBalance && sameAmount) || (sameDate && sameAmount && sameType)
-            }
-
-            if (!alreadyExists) {
+            val recId = "stmt_${selectedAccountKey.hashCode()}_${normalizedDate}_${shortTime}_${amount}_${balAmt}_$r"
+            if (!existingRecordIds.contains(recId)) {
                 val timestamp = shamsiToMillis(normalizedDate, shortTime) + r * 100L
                 newRecords.add(
                     ImportedRecordEntity(
-                        recordId = "stmt_${resolvedAccountKey.hashCode()}_${normalizedDate}_${amount}_$r",
-                        accountKey = resolvedAccountKey,
+                        recordId = recId,
+                        accountKey = selectedAccountKey,
                         amount = amount,
-                        balance = if (balAmt > 0) balAmt else null,
+                        balance = if (balAmt != 0L) balAmt else null,
                         isDeposit = isDeposit,
                         timestampMillis = timestamp,
                         persianDate = "$normalizedDate - $shortTime",
@@ -285,25 +189,14 @@ object ExcelImporter {
         return newRecords
     }
 
-    private fun getFileName(context: Context, uri: Uri): String {
-        var name = ""
-        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (nameIndex != -1 && cursor.moveToFirst()) {
-                name = cursor.getString(nameIndex) ?: ""
-            }
-        }
-        return name
-    }
-
-    private fun splitCsvLine(line: String): List<String> {
+    private fun splitDelimitedLine(line: String): List<String> {
         val result = mutableListOf<String>()
         val sb = StringBuilder()
         var inQuotes = false
         for (ch in line) {
             when {
                 ch == '"' -> inQuotes = !inQuotes
-                (ch == ',' || ch == ';') && !inQuotes -> {
+                (ch == ',' || ch == ';' || ch == '\t') && !inQuotes -> {
                     result.add(sb.toString())
                     sb.clear()
                 }
@@ -314,10 +207,13 @@ object ExcelImporter {
         return result
     }
 
-    private fun parseCleanLong(str: String?): Long {
+    private fun parseSignedLong(str: String?): Long {
         if (str.isNullOrBlank()) return 0L
-        val clean = str.substringBefore(".").replace(Regex("""[^\d]"""), "")
-        return clean.toLongOrNull() ?: 0L
+        val trimmed = str.trim()
+        val isNegative = trimmed.startsWith("-") || (trimmed.startsWith("(") && trimmed.endsWith(")"))
+        val clean = trimmed.substringBefore(".").replace(Regex("""[^\d]"""), "")
+        val absVal = clean.toLongOrNull() ?: 0L
+        return if (isNegative) -absVal else absVal
     }
 
     private fun normalizeShamsiDate(raw: String): String {
@@ -341,7 +237,7 @@ object ExcelImporter {
             pDate.hour = timeParts.getOrNull(0)?.toIntOrNull() ?: 12
             pDate.minute = timeParts.getOrNull(1)?.toIntOrNull() ?: 0
             pDate.time
-        } catch (e: Exception) {
+        } catch (_: Throwable) {
             System.currentTimeMillis()
         }
     }
